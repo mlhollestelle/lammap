@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LAM Traffic Map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f4f4f2;
+    --surface: #fcfcfb;
+    --border: #e2e1dc;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #7a7974;
+    --grid: #ebeae6;
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --missing: #c9c8c2;
+    --marker: #2a78d6;
+    --marker-off: #9a9994;
+    --marker-sel: #eb6834;
+    --error: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #111110;
+      --surface: #1a1a19;
+      --border: #2e2e2c;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #8f8e86;
+      --grid: #2a2a28;
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --missing: #4a4a46;
+      --marker: #3987e5;
+      --marker-off: #6b6a65;
+      --marker-sel: #d95926;
+      --error: #f97066;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #111110;
+    --surface: #1a1a19;
+    --border: #2e2e2c;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #8f8e86;
+    --grid: #2a2a28;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --missing: #4a4a46;
+    --marker: #3987e5;
+    --marker-off: #6b6a65;
+    --marker-sel: #d95926;
+    --error: #f97066;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text-primary);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: grid;
+    grid-template-columns: 1fr 440px;
+    grid-template-rows: 100%;
+  }
+  #map { height: 100%; }
+  #panel {
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 16px 20px 24px;
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 0; }
+  h3 { font-size: 13px; font-weight: 600; margin: 20px 0 4px; }
+  .sub { color: var(--text-secondary); font-size: 12px; }
+  .muted { color: var(--text-muted); }
+  #search {
+    width: 100%; margin: 12px 0 4px; padding: 7px 10px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text-primary); font: inherit;
+  }
+  #results { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }
+  #results li { padding: 5px 8px; border-radius: 4px; cursor: pointer; }
+  #results li:hover { background: var(--bg); }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 14px; }
+  .tile { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .tile .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tile .l { font-size: 11px; color: var(--text-secondary); }
+  .chart { position: relative; width: 100%; }
+  .chart svg { display: block; width: 100%; }
+  .chart text { fill: var(--text-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-secondary); margin: 2px 0 6px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  #tip {
+    position: fixed; pointer-events: none; z-index: 1000; display: none;
+    background: var(--surface); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 9px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.15);
+    white-space: nowrap;
+  }
+  #tip b { font-variant-numeric: tabular-nums; }
+  .error { color: var(--error); }
+  button {
+    font: inherit; padding: 4px 10px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text-primary); cursor: pointer;
+  }
+  .foot { margin-top: 18px; font-size: 11px; color: var(--text-muted); }
+  .foot a { color: var(--text-secondary); }
+  .leaflet-container { background: var(--bg); }
+
+  @media (max-width: 800px) {
+    body { grid-template-columns: 100%; grid-template-rows: 50vh auto; height: auto; }
+    #map { height: 50vh; }
+    #panel { border-left: 0; border-top: 1px solid var(--border); padding: 16px; overflow: visible; }
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<aside id="panel">
+  <h1>LAM traffic counters, Finland</h1>
+  <div class="sub" id="stationCount">Loading stations…</div>
+  <input id="search" type="search" placeholder="Search station by name or number" autocomplete="off">
+  <ul id="results"></ul>
+  <div id="detail"><p class="muted">Click a station on the map to see its traffic for the last 30 days.</p></div>
+</aside>
+<div id="tip"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+"use strict";
+
+const API = "https://tie.digitraffic.fi/api/tms/v1";
+const DAYS = 30;
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const fmt = new Intl.NumberFormat("en-US");
+
+// ---------- dates (Finnish local date, since the reports use Finnish days) ----------
+function helsinkiToday() {
+  // en-CA formats as YYYY-MM-DD
+  const s = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Helsinki" }).format(new Date());
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
+}
+function addDays(date, n) { return new Date(date.getTime() + n * 86400000); }
+function iso(date) { return date.toISOString().slice(0, 10); }
+function key(date) { return iso(date).replace(/-/g, ""); }
+
+// Last 30 complete days: yesterday back to 29 days before that.
+const END = addDays(helsinkiToday(), -1);
+const START = addDays(END, -(DAYS - 1));
+const DATES = Array.from({ length: DAYS }, (_, i) => addDays(START, i));
+
+// ---------- map ----------
+const map = L.map("map", { preferCanvas: true }).setView([64.5, 26], 5);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 18,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Data: Fintraffic / <a href="https://www.digitraffic.fi/">Digitraffic</a>, CC BY 4.0',
+}).addTo(map);
+
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+let stations = [];
+let selectedMarker = null;
+
+function markerStyle(st, selected) {
+  const removed = st.collectionStatus !== "GATHERING";
+  return {
+    radius: selected ? 8 : 5,
+    weight: selected ? 2 : 1,
+    color: css("--surface"),
+    fillColor: selected ? css("--marker-sel") : removed ? css("--marker-off") : css("--marker"),
+    fillOpacity: 0.95,
+  };
+}
+
+function prettyName(name) { return name.replace(/_/g, " "); }
+
+async function loadStations() {
+  try {
+    const res = await fetch(`${API}/stations`, { headers: { "Digitraffic-User": "lammap" } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const gj = await res.json();
+    stations = gj.features.map((f) => ({
+      id: f.id,
+      tms: f.properties.tmsNumber, // the history API is keyed by tmsNumber, NOT by feature id
+      name: f.properties.name,
+      collectionStatus: f.properties.collectionStatus,
+      lat: f.geometry.coordinates[1],
+      lon: f.geometry.coordinates[0],
+    }));
+    for (const st of stations) {
+      st.marker = L.circleMarker([st.lat, st.lon], markerStyle(st, false))
+        .bindTooltip(`${st.tms} · ${prettyName(st.name)}`)
+        .on("click", () => selectStation(st))
+        .addTo(map);
+    }
+    const active = stations.filter((s) => s.collectionStatus === "GATHERING").length;
+    document.getElementById("stationCount").textContent =
+      `${stations.length} stations (${active} active, ${stations.length - active} temporarily removed, grey)`;
+    const fromHash = Number(location.hash.slice(1));
+    const initial = stations.find((s) => s.tms === fromHash);
+    if (initial) { selectStation(initial); map.setView([initial.lat, initial.lon], 10); }
+  } catch (e) {
+    document.getElementById("stationCount").innerHTML =
+      `<span class="error">Could not load stations (${e.message}).</span> <button onclick="location.reload()">Retry</button>`;
+  }
+}
+
+// ---------- search ----------
+const searchEl = document.getElementById("search");
+const resultsEl = document.getElementById("results");
+searchEl.addEventListener("input", () => {
+  const q = searchEl.value.trim().toLowerCase();
+  resultsEl.innerHTML = "";
+  if (!q) return;
+  const hits = stations
+    .filter((s) => String(s.tms) === q || prettyName(s.name).toLowerCase().includes(q))
+    .slice(0, 30);
+  for (const s of hits) {
+    const li = document.createElement("li");
+    li.textContent = `${s.tms} · ${prettyName(s.name)}`;
+    li.onclick = () => {
+      map.setView([s.lat, s.lon], 11);
+      selectStation(s);
+      searchEl.value = "";
+      resultsEl.innerHTML = "";
+    };
+    resultsEl.appendChild(li);
+  }
+  if (!hits.length) resultsEl.innerHTML = '<li class="muted">No matches</li>';
+});
+
+// ---------- data ----------
+const cache = new Map();
+
+function historyUrl(tms) {
+  const p = new URLSearchParams({
+    api: "liikennemaara", // corrected traffic volumes
+    tyyppi: "h",          // hourly report
+    pvm: iso(START),
+    loppu: iso(END),
+    lam_type: "option1",
+    piste: String(tms),
+  });
+  return `${API}/history?${p}`;
+}
+
+// Parses the semicolon CSV and keeps only the "Kaikki" (all vehicles, all directions) rows.
+// Returns Map(YYYYMMDD -> { hours: number[24], total: number }).
+function parseReport(text) {
+  const lines = text.replace(/^﻿/, "").split(/\r?\n/).filter((l) => l.trim());
+  if (!lines.length) return new Map();
+  const header = lines[0].split(";");
+  const col = (name) => header.indexOf(name);
+  const iDate = col("pvm"), iSplit = col("jaottelu"), iTotal = col("yhteensa");
+  const iHours = [];
+  for (let h = 0; h < 24; h++) iHours.push(col(`${String(h).padStart(2, "0")}_${String(h + 1).padStart(2, "0")}`));
+  if (iDate < 0 || iSplit < 0 || iHours.includes(-1)) throw new Error("Unexpected report format");
+
+  const days = new Map();
+  for (const line of lines.slice(1)) {
+    const c = line.split(";");
+    if (c[iSplit] !== "Kaikki") continue;
+    const hours = iHours.map((i) => Number(c[i]) || 0); // empty cell = 0 vehicles
+    const sumHours = hours.reduce((a, b) => a + b, 0);
+    const total = c[iTotal] !== undefined && c[iTotal] !== "" && !isNaN(c[iTotal]) ? Number(c[iTotal]) : sumHours;
+    const prev = days.get(c[iDate]);
+    if (prev) { // defensive: sum if the report ever splits "Kaikki" into multiple rows
+      prev.hours = prev.hours.map((v, i) => v + hours[i]);
+      prev.total += total;
+    } else {
+      days.set(c[iDate], { hours, total });
+    }
+  }
+  return days;
+}
+
+async function fetchReport(tms) {
+  if (cache.has(tms)) return cache.get(tms);
+  // No custom headers here: they trigger a CORS preflight, which the history endpoint rejects (403).
+  const res = await fetch(historyUrl(tms));
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const days = parseReport(await res.text());
+  cache.set(tms, days);
+  return days;
+}
+
+function mean(arr) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : NaN; }
+
+function analyse(days) {
+  const daily = DATES.map((d) => {
+    const rec = days.get(key(d));
+    return { date: d, dow: d.getUTCDay(), total: rec ? rec.total : null, hours: rec ? rec.hours : null };
+  });
+  const present = daily.filter((d) => d.total !== null);
+  const weekday = present.filter((d) => d.dow >= 1 && d.dow <= 5);
+  const weekend = present.filter((d) => d.dow === 0 || d.dow === 6);
+  const hourly = Array.from({ length: 24 }, (_, h) => mean(present.map((d) => d.hours[h])));
+  const hourlySum = hourly.reduce((a, b) => a + b, 0);
+  return {
+    daily,
+    nDays: present.length,
+    adt: mean(present.map((d) => d.total)),
+    adtWeekday: mean(weekday.map((d) => d.total)),
+    adtWeekend: mean(weekend.map((d) => d.total)),
+    hourly,
+    hourlyShare: hourly.map((v) => (hourlySum ? (v / hourlySum) * 100 : 0)),
+  };
+}
+
+// ---------- UI ----------
+let requestSeq = 0;
+
+async function selectStation(st) {
+  if (selectedMarker) selectedMarker.setStyle(markerStyle(selectedMarker.station, false));
+  st.marker.station = st;
+  st.marker.setStyle(markerStyle(st, true)).bringToFront();
+  selectedMarker = st.marker;
+  history.replaceState(null, "", `#${st.tms}`);
+
+  const seq = ++requestSeq;
+  const detail = document.getElementById("detail");
+  const head = `
+    <h2>${escapeHtml(prettyName(st.name))}</h2>
+    <div class="sub">Station ${st.tms}${st.collectionStatus !== "GATHERING" ? " · temporarily removed" : ""}
+      · ${fmtDate(START)} – ${fmtDate(END)}</div>`;
+  detail.innerHTML = head + '<p class="muted">Loading hourly report…</p>';
+
+  try {
+    const days = await fetchReport(st.tms);
+    if (seq !== requestSeq) return; // a newer click won
+    const a = analyse(days);
+    if (!a.nDays) {
+      detail.innerHTML = head + '<p class="muted">No traffic data published for this station in the last 30 days.</p>';
+      return;
+    }
+    detail.innerHTML = head + `
+      <div class="tiles">
+        <div class="tile"><div class="v">${fmtInt(a.adt)}</div><div class="l">Avg. daily traffic</div></div>
+        <div class="tile"><div class="v">${fmtInt(a.adtWeekday)}</div><div class="l">Weekday avg. (Mon–Fri)</div></div>
+        <div class="tile"><div class="v">${fmtInt(a.adtWeekend)}</div><div class="l">Weekend avg. (Sat–Sun)</div></div>
+      </div>
+      <div class="sub" style="margin-top:6px">Vehicles per day, both directions, all vehicle classes.
+        Based on ${a.nDays} of ${DAYS} days with data.</div>
+
+      <h3>Average hourly distribution</h3>
+      <div class="sub">Average vehicles per hour of day (Finnish time)</div>
+      <div class="chart" id="hourChart"></div>
+
+      <h3>Daily traffic, last 30 days</h3>
+      <div class="legend">
+        <span><i style="background:var(--series-1)"></i>Weekday</span>
+        <span><i style="background:var(--series-2)"></i>Weekend</span>
+        ${a.nDays < DAYS ? '<span><i style="background:var(--missing)"></i>No data</span>' : ""}
+      </div>
+      <div class="chart" id="dayChart"></div>
+
+      <div class="foot">
+        Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes).
+        Yesterday's data is normally published around 08–09 Finnish time.
+        <a href="${historyUrl(st.tms)}">Download CSV</a>
+      </div>`;
+
+    drawCharts(a);
+  } catch (e) {
+    if (seq !== requestSeq) return;
+    detail.innerHTML = head + `<p class="error">Could not load data (${escapeHtml(e.message)}).</p>`;
+    const btn = document.createElement("button");
+    btn.textContent = "Retry";
+    btn.onclick = () => selectStation(st);
+    detail.appendChild(btn);
+  }
+}
+
+let current = null;
+function drawCharts(a) {
+  current = a;
+  const hourEl = document.getElementById("hourChart");
+  const dayEl = document.getElementById("dayChart");
+  if (!hourEl || !dayEl) return;
+  barChart(hourEl, a.hourly.map((v, h) => ({
+    label: String(h).padStart(2, "0"),
+    showLabel: h % 3 === 0,
+    value: v,
+    color: "var(--series-1)",
+    tip: `<div>${String(h).padStart(2, "0")}:00–${String(h + 1).padStart(2, "0")}:00</div><b>${fmtInt(v)}</b> vehicles/h · ${a.hourlyShare[h].toFixed(1)}% of day`,
+  })));
+  barChart(dayEl, a.daily.map((d, i) => {
+    const weekend = d.dow === 0 || d.dow === 6;
+    return {
+      label: `${d.date.getUTCDate()}.${d.date.getUTCMonth() + 1}.`,
+      showLabel: i % 5 === 0 || i === a.daily.length - 1,
+      value: d.total,
+      color: weekend ? "var(--series-2)" : "var(--series-1)",
+      tip: `<div>${WEEKDAYS[d.dow]} ${fmtDate(d.date)}</div>` +
+        (d.total === null ? '<span class="muted">No data</span>' : `<b>${fmt.format(d.total)}</b> vehicles`),
+    };
+  }));
+}
+window.addEventListener("resize", () => { if (current) drawCharts(current); });
+
+// Simple SVG bar chart with hover tooltips. value === null renders a small "no data" stub.
+function barChart(el, data) {
+  const W = Math.max(el.clientWidth, 200), H = 170;
+  const m = { t: 8, r: 4, b: 20, l: 44 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const max = Math.max(1, ...data.map((d) => d.value ?? 0));
+  const step = niceStep(max / 4);
+  const top = Math.ceil(max / step) * step;
+  const y = (v) => m.t + ih - (v / top) * ih;
+  const slot = iw / data.length;
+  const gap = Math.min(2, slot * 0.25);
+  const bw = slot - gap;
+
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img">`;
+  for (let v = 0; v <= top + 1e-9; v += step) {
+    s += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)" stroke-width="1"/>`;
+    s += `<text x="${m.l - 6}" y="${y(v) + 3}" text-anchor="end">${compact(v)}</text>`;
+  }
+  data.forEach((d, i) => {
+    const x = m.l + i * slot + gap / 2;
+    if (d.value === null) {
+      s += `<rect x="${x}" y="${y(0) - 3}" width="${bw}" height="3" fill="var(--missing)"/>`;
+    } else if (d.value > 0) {
+      s += `<path d="${topRounded(x, y(d.value), bw, y(0) - y(d.value), Math.min(4, bw / 2))}" fill="${d.color}"/>`;
+    }
+    if (d.showLabel) s += `<text x="${x + bw / 2}" y="${H - 6}" text-anchor="middle">${d.label}</text>`;
+    s += `<rect class="hit" data-i="${i}" x="${m.l + i * slot}" y="${m.t}" width="${slot}" height="${ih}" fill="transparent"/>`;
+  });
+  s += "</svg>";
+  el.innerHTML = s;
+
+  el.querySelectorAll(".hit").forEach((r) => {
+    r.addEventListener("mousemove", (ev) => showTip(ev, data[Number(r.dataset.i)].tip));
+    r.addEventListener("mouseleave", hideTip);
+  });
+}
+
+function topRounded(x, y, w, h, r) {
+  r = Math.min(r, h);
+  return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+}
+function niceStep(raw) {
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / p;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p;
+}
+
+const tip = document.getElementById("tip");
+function showTip(ev, html) {
+  tip.innerHTML = html;
+  tip.style.display = "block";
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  let x = ev.clientX + 12, yy = ev.clientY - th - 10;
+  if (x + tw > window.innerWidth - 8) x = ev.clientX - tw - 12;
+  if (yy < 8) yy = ev.clientY + 14;
+  tip.style.left = `${x}px`;
+  tip.style.top = `${yy}px`;
+}
+function hideTip() { tip.style.display = "none"; }
+
+function fmtInt(v) { return isNaN(v) ? "–" : fmt.format(Math.round(v)); }
+function fmtDate(d) { return `${d.getUTCDate()}.${d.getUTCMonth() + 1}.${d.getUTCFullYear()}`; }
+function compact(v) { return v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : String(+v.toFixed(1)); }
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+loadStations();
+</script>
+</body>
+</html>
