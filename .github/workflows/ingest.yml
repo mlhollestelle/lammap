@@ -1,0 +1,60 @@
+name: Ingest traffic data
+
+on:
+  schedule:
+    # 07:30 UTC = 09:30/10:30 Finnish time; yesterday's report is normally out by then.
+    - cron: "30 7 * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: Days to (re)fetch per station (365 for a full backfill)
+        default: "7"
+
+permissions:
+  contents: read
+  actions: write # for the keepalive step
+
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      # Newer AWS CLI versions send checksum headers that R2 does not fully support.
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      BUCKET: s3://${{ vars.R2_BUCKET }}
+      DAYS: ${{ inputs.days || '7' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Download current data from R2
+        run: aws s3 sync "$BUCKET/stations" data/stations --endpoint-url "$ENDPOINT" --only-show-errors
+
+      - name: Fetch new days from Digitraffic
+        run: |
+          [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days must be a number"; exit 1; }
+          node scripts/ingest.mjs --days "$DAYS"
+
+      - name: Upload to R2
+        run: >
+          aws s3 sync data "$BUCKET" --endpoint-url "$ENDPOINT" --only-show-errors
+          --content-type application/json --cache-control "public, max-age=3600"
+
+      # GitHub disables scheduled workflows after 60 days without repository activity.
+      # Re-enabling it through the API resets that timer (the approach keepalive-workflow uses).
+      - name: Keep the schedule alive
+        run: gh workflow enable ingest.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
