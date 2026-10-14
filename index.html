@@ -19,6 +19,8 @@
     --series-1: #2a78d6;
     --series-2: #eb6834;
     --missing: #c9c8c2;
+    --dir-1: #1b8a7a;
+    --dir-2: #8a5cc7;
     --marker: #2a78d6;
     --marker-off: #9a9994;
     --marker-sel: #eb6834;
@@ -37,6 +39,8 @@
       --series-1: #3987e5;
       --series-2: #d95926;
       --missing: #4a4a46;
+      --dir-1: #2bb39f;
+      --dir-2: #a67ee0;
       --marker: #3987e5;
       --marker-off: #6b6a65;
       --marker-sel: #d95926;
@@ -55,6 +59,8 @@
     --series-1: #3987e5;
     --series-2: #d95926;
     --missing: #4a4a46;
+    --dir-1: #2bb39f;
+    --dir-2: #a67ee0;
     --marker: #3987e5;
     --marker-off: #6b6a65;
     --marker-sel: #d95926;
@@ -113,6 +119,12 @@
     font: inherit; padding: 4px 10px; border-radius: 6px;
     border: 1px solid var(--border); background: var(--bg); color: var(--text-primary); cursor: pointer;
   }
+  .seg { display: flex; margin-top: 14px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .seg button { flex: 1; border: 0; border-radius: 0; padding: 6px 8px; background: transparent; color: var(--text-secondary); }
+  .seg button + button { border-left: 1px solid var(--border); }
+  .seg button[aria-pressed="true"] { background: var(--bg); color: var(--text-primary); font-weight: 600; }
+  .seg button:disabled { cursor: default; opacity: .5; }
+  .split { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin: 6px 0 4px; }
   .foot { margin-top: 18px; font-size: 11px; color: var(--text-muted); }
   .foot a { color: var(--text-secondary); }
   .leaflet-container { background: var(--bg); }
@@ -254,25 +266,41 @@ function historyUrl(tms) {
     lam_type: "option1",
     piste: String(tms),
   });
+  // Without "suunta" the report sums both directions into one row ("*").
+  p.append("suunta", "1");
+  p.append("suunta", "2");
   return `${API}/history?${p}`;
 }
 
-// Parses the semicolon CSV and keeps only the "Kaikki" (all vehicles, all directions) rows.
-// Returns Map(YYYYMMDD -> { hours: number[24], total: number }).
+// Parses the semicolon CSV and keeps only the "Kaikki" (all vehicle classes) rows, split by direction.
+// Direction can come from a direction column ("suunta"/"ajosuunta") or from the "jaottelu" value
+// itself (e.g. "Suunta 1"). Returns { all, d1, d2, hasDirections }, each a
+// Map(YYYYMMDD -> { hours: number[24], total: number }).
 function parseReport(text) {
   const lines = text.replace(/^﻿/, "").split(/\r?\n/).filter((l) => l.trim());
-  if (!lines.length) return new Map();
+  const empty = { all: new Map(), d1: new Map(), d2: new Map(), hasDirections: false };
+  if (!lines.length) return empty;
   const header = lines[0].split(";");
   const col = (name) => header.indexOf(name);
+  const iDir = header.findIndex((h) => /^(ajo)?suunta$/i.test(h.trim()));
   const iDate = col("pvm"), iSplit = col("jaottelu"), iTotal = col("yhteensa");
   const iHours = [];
   for (let h = 0; h < 24; h++) iHours.push(col(`${String(h).padStart(2, "0")}_${String(h + 1).padStart(2, "0")}`));
   if (iDate < 0 || iSplit < 0 || iHours.includes(-1)) throw new Error("Unexpected report format");
 
-  const days = new Map();
+  const maps = { all: new Map(), d1: new Map(), d2: new Map() };
   for (const line of lines.slice(1)) {
     const c = line.split(";");
-    if (c[iSplit] !== "Kaikki") continue;
+    const split = (c[iSplit] || "").trim();
+    let dir;
+    const splitDir = split.match(/suunta\D*([12])/i);
+    if (splitDir) dir = `d${splitDir[1]}`;
+    else if (split.toLowerCase() !== "kaikki") continue; // vehicle class rows
+    else {
+      const m = iDir >= 0 ? String(c[iDir]).match(/[12]/) : null;
+      dir = m ? `d${m[0]}` : "all";
+    }
+    const days = maps[dir];
     const hours = iHours.map((i) => Number(c[i]) || 0); // empty cell = 0 vehicles
     const sumHours = hours.reduce((a, b) => a + b, 0);
     const total = c[iTotal] !== undefined && c[iTotal] !== "" && !isNaN(c[iTotal]) ? Number(c[iTotal]) : sumHours;
@@ -284,7 +312,32 @@ function parseReport(text) {
       days.set(c[iDate], { hours, total });
     }
   }
-  return days;
+  const hasDirections = maps.d1.size > 0 && maps.d2.size > 0;
+  // No combined rows: build "both directions" as the sum of the two.
+  if (!maps.all.size && hasDirections) {
+    for (const [k, v] of maps.d1) {
+      const w = maps.d2.get(k);
+      if (w) maps.all.set(k, { hours: v.hours.map((x, i) => x + w.hours[i]), total: v.total + w.total });
+    }
+  }
+  return { ...maps, hasDirections };
+}
+
+// Direction names ("towards Helsinki") from the station metadata. Best effort.
+const dirNameCache = new Map();
+async function fetchDirectionNames(st) {
+  if (dirNameCache.has(st.id)) return dirNameCache.get(st.id);
+  let names = ["Direction 1", "Direction 2"];
+  try {
+    const res = await fetch(`${API}/stations/${st.id}`, { headers: { "Digitraffic-User": "lammap" } });
+    if (res.ok) {
+      const p = (await res.json()).properties || {};
+      names = [p.direction1Municipality, p.direction2Municipality]
+        .map((m, i) => (m ? `Towards ${m}` : names[i]));
+    }
+  } catch (e) { /* keep defaults */ }
+  dirNameCache.set(st.id, names);
+  return names;
 }
 
 async function fetchReport(tms) {
@@ -292,9 +345,9 @@ async function fetchReport(tms) {
   // No custom headers here: they trigger a CORS preflight, which the history endpoint rejects (403).
   const res = await fetch(historyUrl(tms));
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const days = parseReport(await res.text());
-  cache.set(tms, days);
-  return days;
+  const report = parseReport(await res.text());
+  cache.set(tms, report);
+  return report;
 }
 
 function mean(arr) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : NaN; }
@@ -339,41 +392,19 @@ async function selectStation(st) {
   detail.innerHTML = head + '<p class="muted">Loading hourly report…</p>';
 
   try {
-    const days = await fetchReport(st.tms);
+    const [report, dirNames] = await Promise.all([fetchReport(st.tms), fetchDirectionNames(st)]);
     if (seq !== requestSeq) return; // a newer click won
-    const a = analyse(days);
-    if (!a.nDays) {
+    const view = {
+      all: analyse(report.all),
+      d1: report.hasDirections ? analyse(report.d1) : null,
+      d2: report.hasDirections ? analyse(report.d2) : null,
+    };
+    if (!view.all.nDays) {
       detail.innerHTML = head + '<p class="muted">No traffic data published for this station in the last 30 days.</p>';
       return;
     }
-    detail.innerHTML = head + `
-      <div class="tiles">
-        <div class="tile"><div class="v">${fmtInt(a.adt)}</div><div class="l">Avg. daily traffic</div></div>
-        <div class="tile"><div class="v">${fmtInt(a.adtWeekday)}</div><div class="l">Weekday avg. (Mon–Fri)</div></div>
-        <div class="tile"><div class="v">${fmtInt(a.adtWeekend)}</div><div class="l">Weekend avg. (Sat–Sun)</div></div>
-      </div>
-      <div class="sub" style="margin-top:6px">Vehicles per day, both directions, all vehicle classes.
-        Based on ${a.nDays} of ${DAYS} days with data.</div>
-
-      <h3>Average hourly distribution</h3>
-      <div class="sub">Average vehicles per hour of day (Finnish time)</div>
-      <div class="chart" id="hourChart"></div>
-
-      <h3>Daily traffic, last 30 days</h3>
-      <div class="legend">
-        <span><i style="background:var(--series-1)"></i>Weekday</span>
-        <span><i style="background:var(--series-2)"></i>Weekend</span>
-        ${a.nDays < DAYS ? '<span><i style="background:var(--missing)"></i>No data</span>' : ""}
-      </div>
-      <div class="chart" id="dayChart"></div>
-
-      <div class="foot">
-        Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes).
-        Yesterday's data is normally published around 08–09 Finnish time.
-        <a href="${historyUrl(st.tms)}">Download CSV</a>
-      </div>`;
-
-    drawCharts(a);
+    if (!report.hasDirections) selectedDir = "all";
+    renderDetail(st, head, view, dirNames, report.hasDirections);
   } catch (e) {
     if (seq !== requestSeq) return;
     detail.innerHTML = head + `<p class="error">Could not load data (${escapeHtml(e.message)}).</p>`;
@@ -384,19 +415,101 @@ async function selectStation(st) {
   }
 }
 
+// "all" = both directions, "d1"/"d2" = one direction. Kept when switching station.
+let selectedDir = "all";
+
+function renderDetail(st, head, view, dirNames, hasDirections) {
+  const detail = document.getElementById("detail");
+  const a = view[selectedDir];
+  const dirLabel = selectedDir === "all" ? "both directions" : dirNames[selectedDir === "d1" ? 0 : 1].replace(/^\w/, (c) => c.toLowerCase());
+  const btn = (k, label) =>
+    `<button data-dir="${k}" aria-pressed="${selectedDir === k}" ${hasDirections || k === "all" ? "" : "disabled"}>${escapeHtml(label)}</button>`;
+  let split = "";
+  if (hasDirections && selectedDir === "all") {
+    const t1 = view.d1.adt, t2 = view.d2.adt;
+    const p1 = t1 + t2 ? (t1 / (t1 + t2)) * 100 : 50;
+    split = `
+      <h3>Direction split</h3>
+      <div class="split">
+        <div style="width:${p1}%;background:var(--dir-1)"></div>
+        <div style="width:${100 - p1}%;background:var(--dir-2)"></div>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--dir-1)"></i>${escapeHtml(dirNames[0])}: ${fmtInt(t1)}/day (${p1.toFixed(0)}%)</span>
+        <span><i style="background:var(--dir-2)"></i>${escapeHtml(dirNames[1])}: ${fmtInt(t2)}/day (${(100 - p1).toFixed(0)}%)</span>
+      </div>`;
+  }
+  const stacked = hasDirections && selectedDir === "all";
+  detail.innerHTML = head + `
+    <div class="seg" role="group" aria-label="Direction">
+      ${btn("all", "Both directions")}${btn("d1", dirNames[0])}${btn("d2", dirNames[1])}
+    </div>
+    ${hasDirections ? "" : '<div class="sub" style="margin-top:4px">This report has no per-direction breakdown for this station.</div>'}
+    <div class="tiles">
+      <div class="tile"><div class="v">${fmtInt(a.adt)}</div><div class="l">Avg. daily traffic</div></div>
+      <div class="tile"><div class="v">${fmtInt(a.adtWeekday)}</div><div class="l">Weekday avg. (Mon–Fri)</div></div>
+      <div class="tile"><div class="v">${fmtInt(a.adtWeekend)}</div><div class="l">Weekend avg. (Sat–Sun)</div></div>
+    </div>
+    <div class="sub" style="margin-top:6px">Vehicles per day, ${escapeHtml(dirLabel)}, all vehicle classes.
+      Based on ${a.nDays} of ${DAYS} days with data.</div>
+    ${split}
+
+    <h3>Average hourly distribution</h3>
+    <div class="sub">Average vehicles per hour of day (Finnish time)</div>
+    ${stacked ? `<div class="legend">
+      <span><i style="background:var(--dir-1)"></i>${escapeHtml(dirNames[0])}</span>
+      <span><i style="background:var(--dir-2)"></i>${escapeHtml(dirNames[1])}</span>
+    </div>` : ""}
+    <div class="chart" id="hourChart"></div>
+
+    <h3>Daily traffic, last 30 days</h3>
+    <div class="legend">
+      <span><i style="background:var(--series-1)"></i>Weekday</span>
+      <span><i style="background:var(--series-2)"></i>Weekend</span>
+      ${a.nDays < DAYS ? '<span><i style="background:var(--missing)"></i>No data</span>' : ""}
+    </div>
+    <div class="chart" id="dayChart"></div>
+
+    <div class="foot">
+      Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes).
+      Yesterday's data is normally published around 08–09 Finnish time.
+      <a href="${historyUrl(st.tms)}">Download CSV</a>
+    </div>`;
+  detail.querySelectorAll(".seg button").forEach((b) => {
+    b.onclick = () => {
+      selectedDir = b.dataset.dir;
+      renderDetail(st, head, view, dirNames, hasDirections);
+    };
+  });
+  drawCharts({ a, view, dirNames, stacked });
+}
+
 let current = null;
-function drawCharts(a) {
-  current = a;
+function drawCharts(state) {
+  current = state;
+  const { a, view, dirNames, stacked } = state;
   const hourEl = document.getElementById("hourChart");
   const dayEl = document.getElementById("dayChart");
   if (!hourEl || !dayEl) return;
-  barChart(hourEl, a.hourly.map((v, h) => ({
-    label: String(h).padStart(2, "0"),
-    showLabel: h % 3 === 0,
-    value: v,
-    color: "var(--series-1)",
-    tip: `<div>${String(h).padStart(2, "0")}:00–${String(h + 1).padStart(2, "0")}:00</div><b>${fmtInt(v)}</b> vehicles/h · ${a.hourlyShare[h].toFixed(1)}% of day`,
-  })));
+  barChart(hourEl, a.hourly.map((v, h) => {
+    const range = `${String(h).padStart(2, "0")}:00–${String(h + 1).padStart(2, "0")}:00`;
+    const bar = {
+      label: String(h).padStart(2, "0"),
+      showLabel: h % 3 === 0,
+      value: v,
+      color: selectedDir === "all" ? "var(--series-1)" : `var(--dir-${selectedDir.slice(1)})`,
+      tip: `<div>${range}</div><b>${fmtInt(v)}</b> vehicles/h · ${a.hourlyShare[h].toFixed(1)}% of day`,
+    };
+    if (stacked) {
+      const v1 = view.d1.hourly[h], v2 = view.d2.hourly[h];
+      bar.segments = [{ value: v1 || 0, color: "var(--dir-1)" }, { value: v2 || 0, color: "var(--dir-2)" }];
+      bar.value = (v1 || 0) + (v2 || 0);
+      bar.tip = `<div>${range}</div><b>${fmtInt(bar.value)}</b> vehicles/h` +
+        `<div>${escapeHtml(dirNames[0])}: <b>${fmtInt(v1)}</b></div>` +
+        `<div>${escapeHtml(dirNames[1])}: <b>${fmtInt(v2)}</b></div>`;
+    }
+    return bar;
+  }));
   barChart(dayEl, a.daily.map((d, i) => {
     const weekend = d.dow === 0 || d.dow === 6;
     return {
@@ -433,6 +546,17 @@ function barChart(el, data) {
     const x = m.l + i * slot + gap / 2;
     if (d.value === null) {
       s += `<rect x="${x}" y="${y(0) - 3}" width="${bw}" height="3" fill="var(--missing)"/>`;
+    } else if (d.segments) {
+      let base = 0;
+      const last = d.segments.map((g) => g.value > 0).lastIndexOf(true);
+      d.segments.forEach((g, j) => {
+        if (g.value <= 0) return;
+        const yTop = y(base + g.value), h = y(base) - yTop;
+        s += j === last
+          ? `<path d="${topRounded(x, yTop, bw, h, Math.min(4, bw / 2))}" fill="${g.color}"/>`
+          : `<rect x="${x}" y="${yTop}" width="${bw}" height="${h}" fill="${g.color}"/>`;
+        base += g.value;
+      });
     } else if (d.value > 0) {
       s += `<path d="${topRounded(x, y(d.value), bw, y(0) - y(d.value), Math.min(4, bw / 2))}" fill="${d.color}"/>`;
     }
