@@ -297,6 +297,10 @@ function historyUrl(tms) {
 function toReport(json) {
   const toMap = (o = {}) => new Map(Object.entries(o).map(([k, v]) => [k, { hours: v.slice(0, 24), total: v[24] }]));
   const maps = { all: toMap(json.all), d1: toMap(json.d1), d2: toMap(json.d2) };
+  // One-way stations only report one direction: count the other as zero.
+  for (const [have, fill] of [["d1", "d2"], ["d2", "d1"]]) {
+    if (!maps[fill].size) for (const k of maps[have].keys()) maps[fill].set(k, { hours: Array(24).fill(0), total: 0 });
+  }
   const hasDirections = maps.d1.size > 0 && maps.d2.size > 0;
   // No combined rows: build "both directions" as the sum of the two.
   if (!maps.all.size && hasDirections) {
