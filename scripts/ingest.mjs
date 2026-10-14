@@ -2,24 +2,32 @@
 // file per station, keeping a rolling window of days. Run by .github/workflows/ingest.yml,
 // which syncs the output directory with the R2 bucket before and after.
 //
-//   node scripts/ingest.mjs [--days 7] [--keep 366] [--out data] [--stations 101,102]
+//   node scripts/ingest.mjs [--days 7] [--keep 366] [--out data] [--stations 101,102] [--skip-existing]
+//
+// --skip-existing skips stations that already have a file in <out>, to resume a backfill.
 //
 // Output:
 //   <out>/stations/<tms>.json  { tms, all, d1, d2 }, each a map YYYYMMDD -> [h00..h23, total]
 //                              ("all" only holds rows the report did not split by direction)
 //   <out>/meta.json            { updated, end, keep }
 
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const API = "https://tie.digitraffic.fi/api/tms/v1";
-const HEADERS = { "Digitraffic-User": "lammap-ingest" };
-const CONCURRENCY = 4;
+// Digitraffic throttles per IP, and allows more requests when this header is set
+// (https://www.digitraffic.fi/en/support/instructions/). So every request sends it, stations are
+// fetched one at a time with a minimum gap, and a 429 backs off for minutes rather than seconds.
+const HEADERS = { "Digitraffic-User": "lammap/ingest" };
+const MIN_GAP_MS = 1000;
+const MAX_CONSECUTIVE_FAILURES = 3; // then stop instead of hammering a throttled API
 
 const args = parseArgs(process.argv.slice(2));
 const DAYS = Number(args.days ?? 7);    // how many recent days to (re)fetch
 const KEEP = Number(args.keep ?? 366);  // how many days to keep per station
 const OUT = args.out ?? "data";
+const SKIP_EXISTING = Boolean(args["skip-existing"]);
 
 // ---------- dates (Finnish local date, since the reports use Finnish days) ----------
 function helsinkiToday() {
@@ -36,18 +44,27 @@ const START = addDays(END, -(DAYS - 1));
 const OLDEST_KEPT = key(addDays(END, -(KEEP - 1)));
 
 // ---------- fetch ----------
-async function fetchRetry(url, init, tries = 4) {
-  for (let i = 1; ; i++) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+let lastRequest = 0;
+async function fetchRetry(url, tries = 4) {
+  for (let i = 0; ; i++) {
+    const gap = lastRequest + MIN_GAP_MS - Date.now();
+    if (gap > 0) await sleep(gap);
+    lastRequest = Date.now();
+    let err;
     try {
-      const res = await fetch(url, { ...init, signal: AbortSignal.timeout(120_000) });
+      const res = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(120_000) });
       if (res.ok) return res;
-      if (res.status < 500 && res.status !== 429) throw new Error(`HTTP ${res.status}`);
-      throw Object.assign(new Error(`HTTP ${res.status}`), { retry: true });
+      err = Object.assign(new Error(`HTTP ${res.status}`), { status: res.status, retry: res.status === 429 || res.status >= 500 });
     } catch (e) {
-      const retry = e.retry || e.name === "TimeoutError" || e.name === "TypeError";
-      if (!retry || i >= tries) throw e;
-      await new Promise((r) => setTimeout(r, 2000 * 2 ** i));
+      err = Object.assign(e, { retry: e.name === "TimeoutError" || e.name === "TypeError" });
     }
+    if (!err.retry || i + 1 >= tries) throw err;
+    // Throttled: wait 1, 2, 4 minutes. Other transient errors: 5, 10, 20 seconds.
+    const delay = (err.status === 429 ? 60_000 : 5_000) * 2 ** i;
+    console.log(`  ${err.message}, retrying in ${delay / 1000}s`);
+    await sleep(delay);
   }
 }
 
@@ -125,12 +142,8 @@ async function ingestStation(tms) {
   const file = path.join(OUT, "stations", `${tms}.json`);
   const stored = (await readJson(file)) ?? {};
   const data = { tms };
-  let days = 0;
-  for (const dir of ["all", "d1", "d2"]) {
-    data[dir] = merge(stored[dir], report[dir]);
-    days += Object.keys(data[dir]).length;
-  }
-  if (!days) return 0; // nothing published for this station in the window
+  for (const dir of ["all", "d1", "d2"]) data[dir] = merge(stored[dir], report[dir]);
+  // Written even when empty, so the map never requests a missing file.
   await writeFile(file, JSON.stringify(data));
   return report.d1.size + report.d2.size + report.all.size;
 }
@@ -141,33 +154,36 @@ async function main() {
   if (args.stations) {
     tmsList = String(args.stations).split(",").map(Number);
   } else {
-    const res = await fetchRetry(`${API}/stations`, { headers: HEADERS });
+    const res = await fetchRetry(`${API}/stations`);
     tmsList = (await res.json()).features.map((f) => f.properties.tmsNumber);
   }
   await mkdir(path.join(OUT, "stations"), { recursive: true });
   console.log(`Fetching ${iso(START)} – ${iso(END)} for ${tmsList.length} stations, keeping ${KEEP} days`);
 
   const failed = [];
-  let done = 0, rows = 0;
-  const queue = [...tmsList];
-  await Promise.all(Array.from({ length: CONCURRENCY }, async () => {
-    while (queue.length) {
-      const tms = queue.shift();
-      try {
-        const n = await ingestStation(tms);
-        rows += n;
-      } catch (e) {
-        failed.push(tms);
-        console.error(`Station ${tms}: ${e.message}`);
+  let rows = 0, skipped = 0, consecutive = 0, stopped = false;
+  for (const [i, tms] of tmsList.entries()) {
+    if (SKIP_EXISTING && existsSync(path.join(OUT, "stations", `${tms}.json`))) { skipped++; continue; }
+    try {
+      rows += await ingestStation(tms);
+      consecutive = 0;
+    } catch (e) {
+      failed.push(tms);
+      console.error(`Station ${tms}: ${e.message}`);
+      if (++consecutive >= MAX_CONSECUTIVE_FAILURES) {
+        console.error(`${consecutive} stations failed in a row, stopping`);
+        stopped = true;
+        break;
       }
-      if (++done % 50 === 0) console.log(`${done}/${tmsList.length}`);
     }
-  }));
+    if ((i + 1) % 50 === 0) console.log(`${i + 1}/${tmsList.length}`);
+  }
 
-  console.log(`Done: ${tmsList.length - failed.length} stations, ${rows} direction-days fetched, ${failed.length} failed`);
-  // Only advance the published end date when the run mostly worked.
-  if (failed.length > tmsList.length * 0.1) {
-    console.error(`Too many failures: ${failed.join(", ")}`);
+  const ok = tmsList.length - skipped - failed.length;
+  console.log(`Done: ${ok} stations fetched, ${skipped} skipped, ${failed.length} failed${stopped ? ", stopped early" : ""}; ${rows} direction-days`);
+  // Station files are uploaded either way; only advance the published end date when the run mostly worked.
+  if (stopped || failed.length > tmsList.length * 0.1) {
+    console.error(`Failed: ${failed.join(", ")}`);
     process.exit(1);
   }
   await writeFile(path.join(OUT, "meta.json"), JSON.stringify({ updated: new Date().toISOString(), end: key(END), keep: KEEP }));
@@ -180,7 +196,8 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const m = argv[i].match(/^--([\w-]+)(?:=(.*))?$/);
     if (!m) throw new Error(`Unknown argument: ${argv[i]}`);
-    out[m[1]] = m[2] ?? argv[++i];
+    // A flag without a value (e.g. --skip-existing) is true.
+    out[m[1]] = m[2] ?? (argv[i + 1] === undefined || argv[i + 1].startsWith("--") ? true : argv[++i]);
   }
   return out;
 }
