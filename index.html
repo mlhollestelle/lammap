@@ -262,6 +262,9 @@ function historyUrl(tms) {
     lam_type: "option1",
     piste: String(tms),
   });
+  // Without "suunta" the report sums both directions into one row ("*").
+  p.append("suunta", "1");
+  p.append("suunta", "2");
   return `${API}/history?${p}`;
 }
 
