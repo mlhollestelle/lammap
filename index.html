@@ -143,7 +143,7 @@
   <div class="sub" id="stationCount">Loading stations…</div>
   <input id="search" type="search" placeholder="Search station by name or number" autocomplete="off">
   <ul id="results"></ul>
-  <div id="detail"><p class="muted">Click a station on the map to see its traffic for the last 30 days.</p></div>
+  <div id="detail"><p class="muted">Click a station on the map to see its traffic for the last 30 or 365 days.</p></div>
 </aside>
 <div id="tip"></div>
 
@@ -152,8 +152,11 @@
 "use strict";
 
 const API = "https://tie.digitraffic.fi/api/tms/v1";
-const DAYS = 30;
+// Public URL of the R2 bucket filled by .github/workflows/ingest.yml.
+const DATA = "https://REPLACE-WITH-R2-PUBLIC-URL";
+const RANGES = [30, 365];
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const fmt = new Intl.NumberFormat("en-US");
 
 // ---------- dates (Finnish local date, since the reports use Finnish days) ----------
@@ -166,11 +169,27 @@ function helsinkiToday() {
 function addDays(date, n) { return new Date(date.getTime() + n * 86400000); }
 function iso(date) { return date.toISOString().slice(0, 10); }
 function key(date) { return iso(date).replace(/-/g, ""); }
+function fromKey(k) { return new Date(Date.UTC(+k.slice(0, 4), +k.slice(4, 6) - 1, +k.slice(6, 8))); }
 
-// Last 30 complete days: yesterday back to 29 days before that.
-const END = addDays(helsinkiToday(), -1);
-const START = addDays(END, -(DAYS - 1));
-const DATES = Array.from({ length: DAYS }, (_, i) => addDays(START, i));
+// The selected window ends at the newest day in the data (from meta.json), or yesterday
+// if that can't be loaded. "days" is the selected window length, kept when switching station.
+let END = addDays(helsinkiToday(), -1);
+let updated = null;
+let days = RANGES[0];
+function windowDates() {
+  const start = addDays(END, -(days - 1));
+  return Array.from({ length: days }, (_, i) => addDays(start, i));
+}
+
+async function loadMeta() {
+  try {
+    const res = await fetch(`${DATA}/meta.json`);
+    if (!res.ok) return;
+    const meta = await res.json();
+    END = fromKey(meta.end);
+    updated = new Date(meta.updated);
+  } catch (e) { /* keep defaults */ }
+}
 
 // ---------- map ----------
 const map = L.map("map", { preferCanvas: true }).setView([64.5, 26], 5);
@@ -201,7 +220,7 @@ function prettyName(name) { return name.replace(/_/g, " "); }
 
 async function loadStations() {
   try {
-    const res = await fetch(`${API}/stations`, { headers: { "Digitraffic-User": "lammap" } });
+    const [res] = await Promise.all([fetch(`${API}/stations`, { headers: { "Digitraffic-User": "lammap" } }), loadMeta()]);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const gj = await res.json();
     stations = gj.features.map((f) => ({
@@ -257,11 +276,12 @@ searchEl.addEventListener("input", () => {
 // ---------- data ----------
 const cache = new Map();
 
+// Link to the original Digitraffic CSV for the selected window.
 function historyUrl(tms) {
   const p = new URLSearchParams({
     api: "liikennemaara", // corrected traffic volumes
     tyyppi: "h",          // hourly report
-    pvm: iso(START),
+    pvm: iso(windowDates()[0]),
     loppu: iso(END),
     lam_type: "option1",
     piste: String(tms),
@@ -272,46 +292,11 @@ function historyUrl(tms) {
   return `${API}/history?${p}`;
 }
 
-// Parses the semicolon CSV and keeps only the "Kaikki" (all vehicle classes) rows, split by direction.
-// Direction can come from a direction column ("suunta"/"ajosuunta") or from the "jaottelu" value
-// itself (e.g. "Suunta 1"). Returns { all, d1, d2, hasDirections }, each a
-// Map(YYYYMMDD -> { hours: number[24], total: number }).
-function parseReport(text) {
-  const lines = text.replace(/^﻿/, "").split(/\r?\n/).filter((l) => l.trim());
-  const empty = { all: new Map(), d1: new Map(), d2: new Map(), hasDirections: false };
-  if (!lines.length) return empty;
-  const header = lines[0].split(";");
-  const col = (name) => header.indexOf(name);
-  const iDir = header.findIndex((h) => /^(ajo)?suunta$/i.test(h.trim()));
-  const iDate = col("pvm"), iSplit = col("jaottelu"), iTotal = col("yhteensa");
-  const iHours = [];
-  for (let h = 0; h < 24; h++) iHours.push(col(`${String(h).padStart(2, "0")}_${String(h + 1).padStart(2, "0")}`));
-  if (iDate < 0 || iSplit < 0 || iHours.includes(-1)) throw new Error("Unexpected report format");
-
-  const maps = { all: new Map(), d1: new Map(), d2: new Map() };
-  for (const line of lines.slice(1)) {
-    const c = line.split(";");
-    const split = (c[iSplit] || "").trim();
-    let dir;
-    const splitDir = split.match(/suunta\D*([12])/i);
-    if (splitDir) dir = `d${splitDir[1]}`;
-    else if (split.toLowerCase() !== "kaikki") continue; // vehicle class rows
-    else {
-      const m = iDir >= 0 ? String(c[iDir]).match(/[12]/) : null;
-      dir = m ? `d${m[0]}` : "all";
-    }
-    const days = maps[dir];
-    const hours = iHours.map((i) => Number(c[i]) || 0); // empty cell = 0 vehicles
-    const sumHours = hours.reduce((a, b) => a + b, 0);
-    const total = c[iTotal] !== undefined && c[iTotal] !== "" && !isNaN(c[iTotal]) ? Number(c[iTotal]) : sumHours;
-    const prev = days.get(c[iDate]);
-    if (prev) { // defensive: sum if the report ever splits "Kaikki" into multiple rows
-      prev.hours = prev.hours.map((v, i) => v + hours[i]);
-      prev.total += total;
-    } else {
-      days.set(c[iDate], { hours, total });
-    }
-  }
+// Station files hold { all, d1, d2 }, each mapping YYYYMMDD -> [h00..h23, total] (see scripts/ingest.mjs).
+// Returns { all, d1, d2, hasDirections }, each a Map(YYYYMMDD -> { hours: number[24], total: number }).
+function toReport(json) {
+  const toMap = (o = {}) => new Map(Object.entries(o).map(([k, v]) => [k, { hours: v.slice(0, 24), total: v[24] }]));
+  const maps = { all: toMap(json.all), d1: toMap(json.d1), d2: toMap(json.d2) };
   const hasDirections = maps.d1.size > 0 && maps.d2.size > 0;
   // No combined rows: build "both directions" as the sum of the two.
   if (!maps.all.size && hasDirections) {
@@ -342,18 +327,17 @@ async function fetchDirectionNames(st) {
 
 async function fetchReport(tms) {
   if (cache.has(tms)) return cache.get(tms);
-  // No custom headers here: they trigger a CORS preflight, which the history endpoint rejects (403).
-  const res = await fetch(historyUrl(tms));
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const report = parseReport(await res.text());
+  const res = await fetch(`${DATA}/stations/${tms}.json`);
+  if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
+  const report = toReport(res.ok ? await res.json() : {}); // 404: station not ingested yet
   cache.set(tms, report);
   return report;
 }
 
 function mean(arr) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : NaN; }
 
-function analyse(days) {
-  const daily = DATES.map((d) => {
+function analyse(days, dates) {
+  const daily = dates.map((d) => {
     const rec = days.get(key(d));
     return { date: d, dow: d.getUTCDay(), total: rec ? rec.total : null, hours: rec ? rec.hours : null };
   });
@@ -376,6 +360,13 @@ function analyse(days) {
 // ---------- UI ----------
 let requestSeq = 0;
 
+function headHtml(st) {
+  return `
+    <h2>${escapeHtml(prettyName(st.name))}</h2>
+    <div class="sub">Station ${st.tms}${st.collectionStatus !== "GATHERING" ? " · temporarily removed" : ""}
+      · ${fmtDate(windowDates()[0])} – ${fmtDate(END)}</div>`;
+}
+
 async function selectStation(st) {
   if (selectedMarker) selectedMarker.setStyle(markerStyle(selectedMarker.station, false));
   st.marker.station = st;
@@ -385,29 +376,16 @@ async function selectStation(st) {
 
   const seq = ++requestSeq;
   const detail = document.getElementById("detail");
-  const head = `
-    <h2>${escapeHtml(prettyName(st.name))}</h2>
-    <div class="sub">Station ${st.tms}${st.collectionStatus !== "GATHERING" ? " · temporarily removed" : ""}
-      · ${fmtDate(START)} – ${fmtDate(END)}</div>`;
-  detail.innerHTML = head + '<p class="muted">Loading hourly report…</p>';
+  detail.innerHTML = headHtml(st) + '<p class="muted">Loading traffic data…</p>';
 
   try {
     const [report, dirNames] = await Promise.all([fetchReport(st.tms), fetchDirectionNames(st)]);
     if (seq !== requestSeq) return; // a newer click won
-    const view = {
-      all: analyse(report.all),
-      d1: report.hasDirections ? analyse(report.d1) : null,
-      d2: report.hasDirections ? analyse(report.d2) : null,
-    };
-    if (!view.all.nDays) {
-      detail.innerHTML = head + '<p class="muted">No traffic data published for this station in the last 30 days.</p>';
-      return;
-    }
     if (!report.hasDirections) selectedDir = "all";
-    renderDetail(st, head, view, dirNames, report.hasDirections);
+    renderDetail(st, report, dirNames);
   } catch (e) {
     if (seq !== requestSeq) return;
-    detail.innerHTML = head + `<p class="error">Could not load data (${escapeHtml(e.message)}).</p>`;
+    detail.innerHTML = headHtml(st) + `<p class="error">Could not load data (${escapeHtml(e.message)}).</p>`;
     const btn = document.createElement("button");
     btn.textContent = "Retry";
     btn.onclick = () => selectStation(st);
@@ -418,8 +396,30 @@ async function selectStation(st) {
 // "all" = both directions, "d1"/"d2" = one direction. Kept when switching station.
 let selectedDir = "all";
 
-function renderDetail(st, head, view, dirNames, hasDirections) {
+function renderDetail(st, report, dirNames) {
   const detail = document.getElementById("detail");
+  const dates = windowDates();
+  const hasDirections = report.hasDirections;
+  const view = {
+    all: analyse(report.all, dates),
+    d1: hasDirections ? analyse(report.d1, dates) : null,
+    d2: hasDirections ? analyse(report.d2, dates) : null,
+  };
+  const rangeSeg = `
+    <div class="seg" role="group" aria-label="Period">
+      ${RANGES.map((n) => `<button data-days="${n}" aria-pressed="${days === n}">Last ${n} days</button>`).join("")}
+    </div>`;
+  const wireRange = () => detail.querySelectorAll("[data-days]").forEach((b) => {
+    b.onclick = () => { days = Number(b.dataset.days); renderDetail(st, report, dirNames); };
+  });
+  if (!view.all.nDays) {
+    current = null;
+    detail.innerHTML = headHtml(st) + rangeSeg +
+      `<p class="muted">No traffic data published for this station in the last ${days} days.</p>`;
+    wireRange();
+    return;
+  }
+
   const a = view[selectedDir];
   const dirLabel = selectedDir === "all" ? "both directions" : dirNames[selectedDir === "d1" ? 0 : 1].replace(/^\w/, (c) => c.toLowerCase());
   const btn = (k, label) =>
@@ -440,7 +440,9 @@ function renderDetail(st, head, view, dirNames, hasDirections) {
       </div>`;
   }
   const stacked = hasDirections && selectedDir === "all";
-  detail.innerHTML = head + `
+  const weekly = days > 31;
+  const missing = weekly ? weeks(a.daily).some((w) => w.every((d) => d.total === null)) : a.nDays < days;
+  detail.innerHTML = headHtml(st) + rangeSeg + `
     <div class="seg" role="group" aria-label="Direction">
       ${btn("all", "Both directions")}${btn("d1", dirNames[0])}${btn("d2", dirNames[1])}
     </div>
@@ -451,7 +453,7 @@ function renderDetail(st, head, view, dirNames, hasDirections) {
       <div class="tile"><div class="v">${fmtInt(a.adtWeekend)}</div><div class="l">Weekend avg. (Sat–Sun)</div></div>
     </div>
     <div class="sub" style="margin-top:6px">Vehicles per day, ${escapeHtml(dirLabel)}, all vehicle classes.
-      Based on ${a.nDays} of ${DAYS} days with data.</div>
+      Based on ${a.nDays} of ${days} days with data.</div>
     ${split}
 
     <h3>Average hourly distribution</h3>
@@ -462,42 +464,54 @@ function renderDetail(st, head, view, dirNames, hasDirections) {
     </div>` : ""}
     <div class="chart" id="hourChart"></div>
 
-    <h3>Daily traffic, last 30 days</h3>
+    ${weekly ? `<h3>Weekly traffic, last ${days} days</h3>
+    <div class="sub">Average vehicles per day in each week (Mon–Sun)</div>` : `<h3>Daily traffic, last ${days} days</h3>`}
     <div class="legend">
-      <span><i style="background:var(--series-1)"></i>Weekday</span>
-      <span><i style="background:var(--series-2)"></i>Weekend</span>
-      ${a.nDays < DAYS ? '<span><i style="background:var(--missing)"></i>No data</span>' : ""}
+      ${weekly ? "" : `<span><i style="background:var(--series-1)"></i>Weekday</span>
+      <span><i style="background:var(--series-2)"></i>Weekend</span>`}
+      ${missing ? '<span><i style="background:var(--missing)"></i>No data</span>' : ""}
     </div>
     <div class="chart" id="dayChart"></div>
 
     <div class="foot">
-      Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes).
-      Yesterday's data is normally published around 08–09 Finnish time.
+      Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes), updated daily${updated ? `, last on ${fmtDate(updated)}` : ""}.
       <a href="${historyUrl(st.tms)}">Download CSV</a>
     </div>`;
-  detail.querySelectorAll(".seg button").forEach((b) => {
+  detail.querySelectorAll("[data-dir]").forEach((b) => {
     b.onclick = () => {
       selectedDir = b.dataset.dir;
-      renderDetail(st, head, view, dirNames, hasDirections);
+      renderDetail(st, report, dirNames);
     };
   });
-  drawCharts({ a, view, dirNames, stacked });
+  wireRange();
+  drawCharts({ a, view, dirNames, stacked, weekly });
+}
+
+// Splits days into Monday-to-Sunday weeks; the first and last week may be partial.
+function weeks(daily) {
+  const out = [];
+  for (const d of daily) {
+    if (!out.length || d.dow === 1) out.push([]);
+    out[out.length - 1].push(d);
+  }
+  return out;
 }
 
 let current = null;
 function drawCharts(state) {
   current = state;
-  const { a, view, dirNames, stacked } = state;
+  const { a, view, dirNames, stacked, weekly } = state;
   const hourEl = document.getElementById("hourChart");
   const dayEl = document.getElementById("dayChart");
   if (!hourEl || !dayEl) return;
+  const dirColor = selectedDir === "all" ? "var(--series-1)" : `var(--dir-${selectedDir.slice(1)})`;
   barChart(hourEl, a.hourly.map((v, h) => {
     const range = `${String(h).padStart(2, "0")}:00–${String(h + 1).padStart(2, "0")}:00`;
     const bar = {
       label: String(h).padStart(2, "0"),
       showLabel: h % 3 === 0,
       value: v,
-      color: selectedDir === "all" ? "var(--series-1)" : `var(--dir-${selectedDir.slice(1)})`,
+      color: dirColor,
       tip: `<div>${range}</div><b>${fmtInt(v)}</b> vehicles/h · ${a.hourlyShare[h].toFixed(1)}% of day`,
     };
     if (stacked) {
@@ -510,6 +524,23 @@ function drawCharts(state) {
     }
     return bar;
   }));
+  if (weekly) {
+    barChart(dayEl, weeks(a.daily).map((w) => {
+      const present = w.filter((d) => d.total !== null);
+      const v = present.length ? mean(present.map((d) => d.total)) : null;
+      const monthStart = w.find((d) => d.date.getUTCDate() === 1);
+      return {
+        label: monthStart ? MONTHS[monthStart.date.getUTCMonth()] : "",
+        showLabel: !!monthStart,
+        value: v,
+        color: dirColor,
+        tip: `<div>${fmtDate(w[0].date)} – ${fmtDate(w[w.length - 1].date)}</div>` +
+          (v === null ? '<span class="muted">No data</span>' : `<b>${fmtInt(v)}</b> vehicles/day`) +
+          (present.length && present.length < w.length ? ` <span class="muted">(${present.length} of ${w.length} days)</span>` : ""),
+      };
+    }));
+    return;
+  }
   barChart(dayEl, a.daily.map((d, i) => {
     const weekend = d.dow === 0 || d.dow === 6;
     return {
