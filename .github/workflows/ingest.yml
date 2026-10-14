@@ -9,6 +9,10 @@ on:
       days:
         description: Days to (re)fetch per station (365 for a full backfill)
         default: "7"
+      skip_existing:
+        description: Skip stations already in the bucket (to resume a backfill)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -21,7 +25,7 @@ concurrency:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180 # a full backfill fetches one station at a time
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -32,6 +36,7 @@ jobs:
       ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
       BUCKET: s3://${{ vars.R2_BUCKET }}
       DAYS: ${{ inputs.days || '7' }}
+      SKIP_EXISTING: ${{ inputs.skip_existing && '--skip-existing' || '' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -45,9 +50,11 @@ jobs:
       - name: Fetch new days from Digitraffic
         run: |
           [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days must be a number"; exit 1; }
-          node scripts/ingest.mjs --days "$DAYS"
+          node scripts/ingest.mjs --days "$DAYS" $SKIP_EXISTING
 
+      # Also after a failed fetch, so stations that did succeed are kept.
       - name: Upload to R2
+        if: ${{ !cancelled() }}
         run: >
           aws s3 sync data "$BUCKET" --endpoint-url "$ENDPOINT" --only-show-errors
           --content-type application/json --cache-control "public, max-age=3600"
