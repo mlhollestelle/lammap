@@ -10,7 +10,7 @@ The app is a single `index.html` with no build step.
 
 Traffic history is served as one JSON file per station from a public Cloudflare R2 bucket (`DATA` in `index.html`). The station list and direction names still come straight from Digitraffic.
 
-The [Ingest traffic data](.github/workflows/ingest.yml) workflow keeps the bucket up to date: every morning it downloads the bucket, runs `scripts/ingest.mjs` to refetch the last 7 days for every station, and uploads the result. Run it manually with `days: 365` to backfill a full year.
+The [Ingest traffic data](.github/workflows/ingest.yml) workflow keeps the bucket up to date: every morning it downloads the bucket, runs `scripts/ingest.mjs` to refetch the last 7 days for every station, and uploads the result. Run it manually with `days: 365` to backfill a full year. Requests go one station at a time to stay within Digitraffic's rate limits, so that takes about an hour; if a run stops early, run it again with `skip_existing` to continue where it left off.
 
 It needs these repository settings:
 
