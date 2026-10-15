@@ -1,0 +1,21 @@
+# Runs scripts/collect-nl.mjs as a service. Install with the commands in pi/README.md, which fill in
+# __USER__ and __BUCKET__.
+[Unit]
+Description=lammap: collect Dutch NDW traffic data
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+
+[Service]
+User=__USER__
+WorkingDirectory=/home/__USER__/lammap
+Environment=OUT=/home/__USER__/lammap-data/nl
+Environment=R2_DEST=r2:__BUCKET__
+# The collector needs about 150 MB; the cap keeps a leak from taking the whole Pi down.
+ExecStart=/usr/bin/node --max-old-space-size=128 scripts/collect-nl.mjs --out ${OUT} --on-flush "scripts/upload-nl.sh fd" --on-live "scripts/upload-nl.sh live"
+Restart=always
+RestartSec=60
+# On stop the collector writes and uploads what it has, which can take a while.
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target
