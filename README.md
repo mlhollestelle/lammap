@@ -2,6 +2,8 @@
 
 An interactive map of Finland's LAM traffic counting stations. Click or search for a station to see its traffic for the last 30 or 365 days. Data comes from [Fintraffic / Digitraffic](https://www.digitraffic.fi/) (CC BY 4.0).
 
+A dropdown in the header switches to the Netherlands (`?country=nl`), with a selection of motorway detectors from [NDW](https://www.ndw.nu/) open data and their last 7 days, collected by a Raspberry Pi. See [The Netherlands](#the-netherlands) below.
+
 The app is a single `index.html` with no build step.
 
 **Live:** https://mlhollestelle.github.io/lammap/
@@ -24,3 +26,13 @@ It needs these repository settings:
 To try the script locally: `node scripts/ingest.mjs --days 30 --stations 101,102` (writes to `data/`).
 
 The fundamental diagrams (flow, speed and density per lane, in 5-minute intervals) come from Digitraffic's raw per-vehicle files, aggregated by `scripts/ingest-fd.mjs` into one file per station per day (`fd/<date>/<tms>.json`, gzipped). To try it locally: `node scripts/ingest-fd.mjs --days 7 --stations 149,160`, copy those stations' files and `meta.json` from the bucket into `data/`, run `python3 -m http.server` in the repository and open `http://localhost:8000/?data=data#149`.
+
+## The Netherlands
+
+NDW publishes the minute values of about 20,000 Dutch detectors at <https://opendata.ndw.nu/> without an account, but only the latest minute. History is in [Dexter](https://dexter.ndw.nu/), which needs a login. So lammap collects the minute data itself and keeps the last 7 days.
+
+`scripts/collect-nl.mjs` runs all the time on a small always-on computer: a Raspberry Pi, see [pi/README.md](pi/README.md) for the setup. (Not on GitHub Actions: a job running around the clock is not what Actions is meant for.) Every minute it downloads `snelheden_en_intensiteiten_meetgegevens.xml.gz` (DATEX II v3, about 1 MB gzipped) and adds each detector's new minute to 5-minute intervals per lane. It reads the file as a stream, so it needs only about 150 MB of memory. Every 30 minutes `scripts/upload-nl.sh` uploads the day files to `nl/fd/<date>/<station>.json` in the same bucket (with rclone) and deletes days older than a week; every 5 minutes `nl/live.json` holds the last 5 minutes of every lane for the live dots. Minutes it misses (a restart, a failed download) are recorded per interval (`m`, minutes with data), and the page scales hours up from the minutes it has, or leaves out a day with an hour under 30 minutes.
+
+The stations are pairs of Rijkswaterstaat MONIBAS loop detectors on the two main carriageways of a motorway (`hrr`, with the hectometre numbering, and `hrl`, against it), at most 300 m apart. Their ids give the road and position: `RWS01_MONIBAS_0021hrr0123ra` is the A2 (road `002`), right carriageway, km 12.3. The DATEX II v3 site table has no lane numbers, but MONIBAS sites list a flow and a speed per lane in lane order, and lane 1 is the left lane (in a sample of all 3-lane carriageways, lanes 1, 2 and 3 averaged 120, 110 and 100 km/h). MONIBAS reports no vehicle classes, so there is no heavy-vehicle share for the Netherlands. The first run picks 250 stations spread over the country and keeps that list (`stations.json`), so their history stays continuous. The daily and hourly charts are built from the same 5-minute files as the fundamental diagram.
+
+To try it without the bucket: `node scripts/collect-nl.mjs --minutes 10 --stations 20 --out data/nl`, then `python3 -m http.server` and open `http://localhost:8000/?data=data&country=nl`.
