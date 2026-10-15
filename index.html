@@ -613,7 +613,7 @@ async function fetchFd(tms) {
   const dates = Array.from({ length: FD_DAYS }, (_, i) => addDays(END, -(FD_DAYS - 1) + i));
   const days = await Promise.all(dates.map(async (date) => {
     try {
-      const res = await fetch(`${FD}/${tms}/${iso(date)}.json`);
+      const res = await fetch(`${FD}/${iso(date)}/${tms}.json`);
       return res.ok ? { date, lanes: (await res.json()).lanes } : null;
     } catch (e) { return null; }
   }));

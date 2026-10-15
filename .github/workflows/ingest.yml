@@ -13,6 +13,9 @@ on:
         description: Skip stations already in the bucket (to resume a backfill)
         type: boolean
         default: false
+      fd_days:
+        description: Days of 5-minute lane data to fill in (only missing days are fetched)
+        default: "7"
 
 permissions:
   contents: read
@@ -37,6 +40,7 @@ jobs:
       BUCKET: s3://${{ vars.R2_BUCKET }}
       DAYS: ${{ inputs.days || '7' }}
       SKIP_EXISTING: ${{ inputs.skip_existing && '--skip-existing' || '' }}
+      FD_DAYS: ${{ inputs.fd_days || '7' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -58,6 +62,29 @@ jobs:
         run: >
           aws s3 sync data "$BUCKET" --endpoint-url "$ENDPOINT" --only-show-errors
           --content-type application/json --cache-control "public, max-age=3600"
+
+      # 5-minute lane data for the fundamental diagrams. Only the last FD_DAYS date folders are
+      # listed (not downloaded), so the script fetches just the days that are missing.
+      - name: List stored lane data
+        if: ${{ !cancelled() }}
+        run: |
+          [[ "$FD_DAYS" =~ ^[0-9]+$ ]] || { echo "fd_days must be a number"; exit 1; }
+          for i in $(seq 1 "$FD_DAYS"); do
+            aws s3 ls --recursive "$BUCKET/fd/$(TZ=Europe/Helsinki date -d "-$i day" +%F)/" --endpoint-url "$ENDPOINT" || true
+          done > fd-keys.txt
+          wc -l < fd-keys.txt
+
+      - name: Fetch lane data from Digitraffic
+        if: ${{ !cancelled() }}
+        run: node scripts/ingest-fd.mjs --days "$FD_DAYS" --out fd-out --existing fd-keys.txt
+
+      # Day files never change once written, so they are stored gzipped and cached for a day.
+      - name: Upload lane data to R2
+        if: ${{ !cancelled() && hashFiles('fd-out/**') != '' }}
+        run: |
+          find fd-out -name '*.json' -exec gzip -9 -n {} \; -exec sh -c 'mv "$1.gz" "$1"' _ {} \;
+          aws s3 cp fd-out/fd "$BUCKET/fd" --recursive --endpoint-url "$ENDPOINT" --only-show-errors \
+            --content-type application/json --content-encoding gzip --cache-control "public, max-age=86400"
 
       # GitHub disables scheduled workflows after 60 days without repository activity.
       # Re-enabling it through the API resets that timer (the approach keepalive-workflow uses).

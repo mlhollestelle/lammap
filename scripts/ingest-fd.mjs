@@ -3,11 +3,12 @@
 //
 //   node scripts/ingest-fd.mjs [--days 7] [--out data] [--stations 101,102] [--existing keys.txt]
 //
-// Only days that are missing are fetched: a day is skipped when <out>/fd/<tms>/<date>.json exists,
+// Only days that are missing are fetched: a day is skipped when <out>/fd/<date>/<tms>.json exists,
 // or when its key appears in --existing (a listing of the bucket, e.g. `aws s3 ls --recursive`),
-// so a failed run is caught up by the next one.
+// so a failed run is caught up by the next one. Files are grouped by date, so that listing only
+// needs the last few date prefixes.
 //
-// Output: <out>/fd/<tms>/<YYYY-MM-DD>.json
+// Output: <out>/fd/<YYYY-MM-DD>/<tms>.json
 //   { tms, date, interval: 5, lanes: [{ lane, dir, n, heavy, vh, va }] }
 //   Each array has one value per 5-minute interval of the Finnish day (288):
 //   n = vehicles, heavy = trucks and buses, vh/va = harmonic/arithmetic mean speed in km/h × 10
@@ -95,11 +96,11 @@ function aggregate(text) {
     }));
 }
 
-// Keys like "fd/101/2026-10-14.json" from a bucket listing, so stored days aren't refetched.
+// Keys like "fd/2026-10-14/101.json" from a bucket listing, so stored days aren't refetched.
 async function readExisting(file) {
   if (!file) return new Set();
   const text = await readFile(file, "utf8");
-  return new Set(text.match(/fd\/\d+\/\d{4}-\d{2}-\d{2}\.json/g) ?? []);
+  return new Set(text.match(/fd\/\d{4}-\d{2}-\d{2}\/\d+\.json/g) ?? []);
 }
 
 // ---------- main ----------
@@ -119,7 +120,7 @@ async function main() {
   const jobs = [];
   for (const tms of tmsList) {
     for (const date of dates) {
-      const k = `fd/${tms}/${iso(date)}.json`;
+      const k = `fd/${iso(date)}/${tms}.json`;
       if (!existing.has(k) && !existsSync(path.join(OUT, k))) jobs.push({ tms, date, file: path.join(OUT, k) });
     }
   }
