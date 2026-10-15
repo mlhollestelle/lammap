@@ -25,6 +25,11 @@
     --marker-off: #9a9994;
     --marker-sel: #eb6834;
     --error: #b42318;
+    --lane-1: #2a78d6;
+    --lane-2: #eb6834;
+    --lane-3: #1baf7a;
+    --lane-4: #eda100;
+    --lane-5: #e87ba4;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -45,6 +50,11 @@
       --marker-off: #6b6a65;
       --marker-sel: #d95926;
       --error: #f97066;
+      --lane-1: #3987e5;
+      --lane-2: #d95926;
+      --lane-3: #199e70;
+      --lane-4: #c98500;
+      --lane-5: #d55181;
     }
   }
   :root[data-theme="dark"] {
@@ -65,6 +75,11 @@
     --marker-off: #6b6a65;
     --marker-sel: #d95926;
     --error: #f97066;
+    --lane-1: #3987e5;
+    --lane-2: #d95926;
+    --lane-3: #199e70;
+    --lane-4: #c98500;
+    --lane-5: #d55181;
   }
 
   * { box-sizing: border-box; }
@@ -125,6 +140,12 @@
   .seg button + button { border-left: 1px solid var(--border); }
   .seg button[aria-pressed="true"] { background: var(--bg); color: var(--text-primary); font-weight: 600; }
   .seg button:disabled { cursor: default; opacity: .5; }
+  .chart canvas { display: block; width: 100%; }
+  .lanes { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; }
+  .lanes button { font-size: 12px; padding: 2px 8px; color: var(--text-secondary); }
+  .lanes button i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: 0; }
+  .lanes button[aria-pressed="false"] { opacity: .45; }
+  .lanes button[aria-pressed="false"] i { background: transparent !important; box-shadow: inset 0 0 0 1px var(--text-muted); }
   .split { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin: 6px 0 4px; }
   .foot { margin-top: 18px; font-size: 11px; color: var(--text-muted); }
   .foot a { color: var(--text-secondary); }
@@ -165,8 +186,13 @@
 "use strict";
 
 const API = "https://tie.digitraffic.fi/api/tms/v1";
-// Public URL of the R2 bucket filled by .github/workflows/ingest.yml.
-const DATA = "https://pub-7ef605d5211f4ee0aca2e94617311d5a.r2.dev";
+// Public URL of the R2 bucket filled by .github/workflows/ingest.yml. "?data=<url>" points the
+// page at another copy, e.g. data/ from the ingest scripts: run `python3 -m http.server` in the
+// repository and open http://localhost:8000/?data=data
+const DATA = new URLSearchParams(location.search).get("data") ?? "https://pub-7ef605d5211f4ee0aca2e94617311d5a.r2.dev";
+// 5-minute per-lane files from scripts/ingest-fd.mjs.
+const FD = `${DATA}/fd`;
+const FD_DAYS = 7;
 const RANGES = [30, 365];
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -490,6 +516,8 @@ function renderDetail(st, report, dirNames) {
     </div>
     <div class="chart" id="dayChart"></div>
 
+    <div id="fd"></div>
+
     <div class="foot">
       Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes), updated daily${updated ? `, last on ${fmtDate(updated)}` : ""}.
       <a href="${historyUrl(st.tms)}">Download CSV</a>
@@ -502,6 +530,7 @@ function renderDetail(st, report, dirNames) {
   });
   wireRange();
   drawCharts({ a, view, dirNames, stacked, weekly });
+  showFd(st, dirNames);
 }
 
 // Splits days into Monday-to-Sunday weeks; the first and last week may be partial.
@@ -570,7 +599,203 @@ function drawCharts(state) {
     };
   }));
 }
-window.addEventListener("resize", () => { if (current) drawCharts(current); });
+window.addEventListener("resize", () => {
+  if (current) drawCharts(current);
+  if (fdState) drawFd();
+});
+
+// ---------- fundamental diagram ----------
+const fdCache = new Map();
+
+// The last FD_DAYS day files of a station; days without a file are left out.
+async function fetchFd(tms) {
+  if (fdCache.has(tms)) return fdCache.get(tms);
+  const dates = Array.from({ length: FD_DAYS }, (_, i) => addDays(END, -(FD_DAYS - 1) + i));
+  const days = await Promise.all(dates.map(async (date) => {
+    try {
+      const res = await fetch(`${FD}/${iso(date)}/${tms}.json`);
+      return res.ok ? { date, lanes: (await res.json()).lanes } : null;
+    } catch (e) { return null; }
+  }));
+  const out = days.filter(Boolean);
+  fdCache.set(tms, out);
+  return out;
+}
+
+const FD_MODES = {
+  qv: { label: "Flow–speed", x: "q", y: "v" },
+  kq: { label: "Density–flow", x: "k", y: "q" },
+  kv: { label: "Density–speed", x: "k", y: "v" },
+};
+const FD_AXES = {
+  q: { label: "Flow (veh/h per lane)" },
+  v: { label: "Speed (km/h)" },
+  k: { label: "Density (veh/km per lane)" },
+};
+let fdMode = "qv";
+let fdState = null;
+
+// Builds one point per lane per 5-minute interval: flow q = n × 12 veh/h, speed v = harmonic
+// mean (the space-mean speed estimate), density k = q / v.
+// Lanes are numbered across the road: direction 1 from its right edge leftwards, direction 2 from
+// the median outwards (inferred from heavy-vehicle shares, which are highest in the right lane).
+// So within each direction, the rightmost lane comes first.
+function fdLanes(days) {
+  const byId = new Map();
+  for (const day of days) {
+    for (const l of day.lanes) {
+      const id = `${l.dir}:${l.lane}`;
+      if (!byId.has(id)) byId.set(id, { id, dir: l.dir, lane: l.lane, total: 0, points: [] });
+      const lane = byId.get(id);
+      l.n.forEach((n, i) => {
+        if (!n || !l.vh[i]) return;
+        const q = n * 12, v = l.vh[i] / 10;
+        lane.total += n;
+        lane.points.push({ q, v, k: q / v, heavy: l.heavy[i] / n, date: day.date, slot: i });
+      });
+    }
+  }
+  const dirs = { 1: [], 2: [] };
+  for (const lane of byId.values()) if (dirs[lane.dir]) dirs[lane.dir].push(lane);
+  for (const [d, lanes] of Object.entries(dirs)) {
+    lanes.sort((a, b) => (d === "1" ? a.lane - b.lane : b.lane - a.lane));
+    const total = lanes.reduce((s, l) => s + l.total, 0);
+    lanes.forEach((l, i) => {
+      l.color = `--lane-${Math.min(i + 1, 5)}`;
+      // Lanes with hardly any traffic are usually misdetections; they start hidden.
+      l.minor = l.total < total * 0.01;
+    });
+  }
+  return dirs;
+}
+
+async function showFd(st, dirNames) {
+  const el = document.getElementById("fd");
+  if (!el) return;
+  const seq = requestSeq;
+  if (!fdState || fdState.tms !== st.tms) fdState = { tms: st.tms, hidden: null, dirs: null };
+  if (!fdState.dirs) {
+    const days = await fetchFd(st.tms);
+    if (seq !== requestSeq || !document.getElementById("fd")) return;
+    if (!days.length) { fdState = null; return; }
+    fdState.dirs = fdLanes(days);
+    fdState.nDays = days.length;
+    fdState.hidden = new Set(Object.values(fdState.dirs).flat().filter((l) => l.minor).map((l) => l.id));
+  }
+  fdState.dirNames = dirNames;
+  renderFd();
+}
+
+function renderFd() {
+  const el = document.getElementById("fd");
+  const { dirs, dirNames, nDays } = fdState;
+  const shown = ["1", "2"].filter((d) => dirs[d].length && (selectedDir === "all" || selectedDir === `d${d}`));
+  el.innerHTML = `
+    <h3>Fundamental diagram</h3>
+    <div class="sub">One dot per lane per 5 minutes, last ${nDays} day${nDays === 1 ? "" : "s"}.
+      Speed is the harmonic mean; density is flow ÷ speed. From Digitraffic's raw per-vehicle data.</div>
+    <div class="seg" role="group" aria-label="Diagram">
+      ${Object.entries(FD_MODES).map(([k, m]) => `<button data-fd="${k}" aria-pressed="${fdMode === k}">${m.label}</button>`).join("")}
+    </div>
+    ${shown.map((d) => `
+      <h3>${escapeHtml(dirNames[d - 1])}</h3>
+      <div class="lanes" role="group" aria-label="Lanes, right to left">
+        ${dirs[d].map((l) => `<button data-lane="${l.id}" aria-pressed="${!fdState.hidden.has(l.id)}"
+          title="${fmt.format(l.total)} vehicles"><i style="background:var(${l.color})"></i>Lane ${l.lane}</button>`).join("")}
+        <span class="sub" style="align-self:center">right → left</span>
+      </div>
+      <div class="chart" data-fd-dir="${d}"></div>`).join("")}`;
+  el.querySelectorAll("[data-fd]").forEach((b) => {
+    b.onclick = () => { fdMode = b.dataset.fd; renderFd(); };
+  });
+  el.querySelectorAll("[data-lane]").forEach((b) => {
+    b.onclick = () => {
+      const id = b.dataset.lane;
+      if (fdState.hidden.has(id)) fdState.hidden.delete(id); else fdState.hidden.add(id);
+      renderFd();
+    };
+  });
+  drawFd();
+}
+
+function drawFd() {
+  const charts = document.querySelectorAll("[data-fd-dir]");
+  if (!charts.length) return;
+  const { x, y } = FD_MODES[fdMode];
+  // Shared scales, so both directions can be compared at a glance.
+  const visible = (d) => fdState.dirs[d].filter((l) => !fdState.hidden.has(l.id));
+  const all = [...charts].flatMap((c) => visible(c.dataset.fdDir).flatMap((l) => l.points));
+  const top = (key) => {
+    const max = Math.max(1, ...all.map((p) => p[key]));
+    const step = niceStep(max / 4);
+    return { max: Math.ceil(max / step) * step, step };
+  };
+  const sx = top(x), sy = top(y);
+  charts.forEach((c) => scatter(c, visible(c.dataset.fdDir), x, y, sx, sy));
+}
+
+// Canvas scatter plot: thousands of points stay cheap, and hover finds the nearest point.
+function scatter(el, lanes, xKey, yKey, sx, sy) {
+  const W = Math.max(el.clientWidth, 200), H = 220;
+  const m = { t: 8, r: 8, b: 34, l: 44 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const X = (v) => m.l + (v / sx.max) * iw;
+  const Y = (v) => m.t + ih - (v / sy.max) * ih;
+  const dpr = window.devicePixelRatio || 1;
+  el.innerHTML = `<canvas width="${W * dpr}" height="${H * dpr}" style="height:${H}px" role="img"
+    aria-label="${FD_AXES[yKey].label} against ${FD_AXES[xKey].label}"></canvas>`;
+  const canvas = el.firstChild;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.font = "10px system-ui, sans-serif";
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = css("--grid");
+  ctx.fillStyle = css("--text-muted");
+  ctx.textAlign = "right";
+  for (let v = 0; v <= sy.max + 1e-9; v += sy.step) {
+    ctx.beginPath(); ctx.moveTo(m.l, Y(v)); ctx.lineTo(W - m.r, Y(v)); ctx.stroke();
+    ctx.fillText(compact(v), m.l - 6, Y(v) + 3);
+  }
+  ctx.textAlign = "center";
+  for (let v = 0; v <= sx.max + 1e-9; v += sx.step) {
+    ctx.beginPath(); ctx.moveTo(X(v), m.t); ctx.lineTo(X(v), m.t + ih); ctx.stroke();
+    ctx.fillText(compact(v), X(v), m.t + ih + 13);
+  }
+  ctx.fillText(FD_AXES[xKey].label, m.l + iw / 2, H - 4);
+  ctx.save();
+  ctx.translate(10, m.t + ih / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText(FD_AXES[yKey].label, 0, 0);
+  ctx.restore();
+
+  const pts = [];
+  ctx.globalAlpha = 0.55;
+  for (const l of lanes) {
+    ctx.fillStyle = css(l.color);
+    for (const p of l.points) {
+      const px = X(p[xKey]), py = Y(p[yKey]);
+      ctx.beginPath(); ctx.arc(px, py, 2.2, 0, Math.PI * 2); ctx.fill();
+      pts.push({ px, py, p, l });
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  canvas.addEventListener("mousemove", (ev) => {
+    const r = canvas.getBoundingClientRect();
+    const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+    let best = null, bd = 100; // within 10 px
+    for (const o of pts) {
+      const d = (o.px - mx) ** 2 + (o.py - my) ** 2;
+      if (d < bd) { bd = d; best = o; }
+    }
+    if (!best) return hideTip();
+    const { p, l } = best;
+    const t = (s) => `${String(Math.floor(s / 12)).padStart(2, "0")}:${String((s % 12) * 5).padStart(2, "0")}`;
+    showTip(ev, `<div>${WEEKDAYS[p.date.getUTCDay()]} ${fmtDate(p.date)} ${t(p.slot)}–${t(p.slot + 1)} · lane ${l.lane}</div>` +
+      `<b>${fmtInt(p.q)}</b> veh/h · <b>${p.v.toFixed(0)}</b> km/h · <b>${p.k.toFixed(1)}</b> veh/km` +
+      `<div class="muted">${(p.heavy * 100).toFixed(0)}% heavy vehicles</div>`);
+  });
+  canvas.addEventListener("mouseleave", hideTip);
+}
 
 // Simple SVG bar chart with hover tooltips. value === null renders a small "no data" stub.
 function barChart(el, data) {
