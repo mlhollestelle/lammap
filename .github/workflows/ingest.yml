@@ -14,7 +14,7 @@ on:
         type: boolean
         default: false
       fd_days:
-        description: Days of 5-minute lane data to fill in (only missing days are fetched)
+        description: Days of 5-minute lane data to keep (only missing days are fetched, older days are deleted)
         default: "7"
 
 permissions:
@@ -85,6 +85,18 @@ jobs:
           find fd-out -name '*.json' -exec gzip -9 -n {} \; -exec sh -c 'mv "$1.gz" "$1"' _ {} \;
           aws s3 cp fd-out/fd "$BUCKET/fd" --recursive --endpoint-url "$ENDPOINT" --only-show-errors \
             --content-type application/json --content-encoding gzip --cache-control "public, max-age=86400"
+
+      # The page only shows the last FD_DAYS days, so older date folders are deleted.
+      - name: Delete old lane data
+        run: |
+          cutoff=$(TZ=Europe/Helsinki date -d "-$FD_DAYS day" +%F)
+          aws s3 ls "$BUCKET/fd/" --endpoint-url "$ENDPOINT" | awk '$1 == "PRE" { sub("/$", "", $2); print $2 }' |
+            while read -r day; do
+              if [[ "$day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && "$day" < "$cutoff" ]]; then
+                echo "Deleting $day"
+                aws s3 rm "$BUCKET/fd/$day/" --recursive --endpoint-url "$ENDPOINT" --only-show-errors
+              fi
+            done
 
       # GitHub disables scheduled workflows after 60 days without repository activity.
       # Re-enabling it through the API resets that timer (the approach keepalive-workflow uses).
