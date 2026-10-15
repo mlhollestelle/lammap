@@ -22,3 +22,5 @@ It needs these repository settings:
 | `R2_BUCKET` | variable | bucket name |
 
 To try the script locally: `node scripts/ingest.mjs --days 30 --stations 101,102` (writes to `data/`).
+
+The fundamental diagrams (flow, speed and density per lane, in 5-minute intervals) come from Digitraffic's raw per-vehicle files, aggregated by `scripts/ingest-fd.mjs` into one file per station per day (`fd/<tms>/<date>.json`). To try it locally: `node scripts/ingest-fd.mjs --days 7 --stations 149,160`, copy those stations' files and `meta.json` from the bucket into `data/`, run `python3 -m http.server` in the repository and open `http://localhost:8000/?data=data#149`.
