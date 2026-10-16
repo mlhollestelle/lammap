@@ -10,7 +10,8 @@ User=__USER__
 WorkingDirectory=/home/__USER__/lammap
 Environment=OUT=/home/__USER__/lammap-data/nl
 Environment=R2_DEST=r2:__BUCKET__
-# The collector needs about 150 MB; the cap keeps a leak from taking the whole Pi down.
+# The collector uses about 250 MB for all national roads, of which under 100 MB is JavaScript heap;
+# the cap keeps a leak from taking the whole Pi down.
 ExecStart=/usr/bin/node --max-old-space-size=128 scripts/collect-nl.mjs --out ${OUT} --on-flush "scripts/upload-nl.sh fd" --on-live "scripts/upload-nl.sh live"
 Restart=always
 RestartSec=60

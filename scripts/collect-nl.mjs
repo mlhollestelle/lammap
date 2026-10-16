@@ -2,17 +2,22 @@
 // 5-minute intervals per lane, in the same day files as the Finnish fundamental diagrams.
 // NDW publishes only the latest minute without an account (history is in Dexter, which needs one),
 // so this runs all the time and polls every minute, as a service on a small always-on computer
-// (see pi/README.md). The files are read as a stream, so it needs only tens of MB of memory.
+// (see pi/README.md). The files are read as a stream and the counts kept in typed arrays, so all
+// national roads (about 2,600 stations, 14,500 lanes) fit in about 250 MB of memory.
 //
-//   node scripts/collect-nl.mjs [--minutes 0] [--out nl] [--stations 250] [--select] [--keep-days 8]
-//                               [--flush-every 30] [--on-flush "cmd"] [--on-live "cmd"]
+//   node scripts/collect-nl.mjs [--minutes 0] [--out nl] [--stations 0] [--select] [--keep-days 8]
+//                               [--flush-every 60] [--upload-every 120] [--on-flush "cmd"] [--on-live "cmd"]
 //
 // --minutes 0 (the default) runs until stopped; on SIGTERM or SIGINT the files are written first.
 // --select (re)builds the station list; it is also built when <out>/stations.json is missing.
 // The list is kept between runs, so the stations (and their history) stay the same.
+// --stations 0 (the default) takes every station; a number picks that many, spread over the country.
 // --keep-days: day folders older than this many days (today included) are deleted.
-// --on-flush runs a shell command after the day files are written (every --flush-every minutes and
-// at the end), --on-live after each live.json update (every 5 minutes), e.g. to upload them.
+// --flush-every: minutes between writing the day files (in the background, while polling goes on).
+// --on-flush runs a shell command after the day files are written, at most every --upload-every
+// minutes and at the end; --on-live after each live.json update (every 5 minutes). They upload the
+// files: every station's file changes all day, so uploading less often keeps the number of uploads
+// down (about 2,600 per upload).
 //
 // Output:
 //   <out>/stations.json         [{ key, name, road, km, lat, lon, sites: { 1: id, 2: id }, lanes: { 1: n, 2: n } }]
@@ -33,7 +38,11 @@ import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { createGunzip, gunzipSync, gzipSync } from "node:zlib";
+import { promisify } from "node:util";
+import { createGunzip, gunzip, gzip } from "node:zlib";
+
+const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
 
 // NDW_BASE and NDW_POLL_SECONDS point the script at another copy of the files and poll it faster,
 // for testing.
@@ -49,8 +58,9 @@ const TZ = "Europe/Amsterdam";
 const args = parseArgs(process.argv.slice(2));
 const MINUTES = Number(args.minutes ?? 0);
 const OUT = args.out ?? "nl";
-const N_STATIONS = Number(args.stations ?? 250);
-const FLUSH_EVERY = Number(args["flush-every"] ?? 30);
+const N_STATIONS = Number(args.stations ?? 0);
+const FLUSH_EVERY = Number(args["flush-every"] ?? 60);
+const UPLOAD_EVERY = Number(args["upload-every"] ?? 120);
 const KEEP_DAYS = Number(args["keep-days"] ?? 8);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -135,8 +145,8 @@ function distM(a, b) {
 
 // Pairs each right-carriageway site with the nearest left-carriageway site of the same road (within
 // 300 m) into a station with two directions, like the Finnish stations, and keeps only sites that are
-// reporting now. Then picks stations spread over the country: each next station is the one farthest
-// from those already picked.
+// reporting now. With n > 0, picks n stations spread over the country: each next station is the one
+// farthest from those already picked.
 function selectStations(sites, reporting, n) {
   const ok = sites.filter((s) => reporting.has(s.id));
   const left = ok.filter((s) => s.cw === "hrl");
@@ -162,7 +172,7 @@ function selectStations(sites, reporting, n) {
       lanes: { 1: r.lanes, 2: best.lanes },
     });
   }
-  if (!stations.length) return [];
+  if (!(n > 0) || n >= stations.length) return stations.sort((a, b) => a.key.localeCompare(b.key));
   // Farthest-point sampling, starting from the station nearest the middle of the country.
   const mid = { lat: 52.2, lon: 5.3 };
   const picked = [stations.reduce((a, b) => (distM(a, mid) < distM(b, mid) ? a : b))];
@@ -233,9 +243,10 @@ function localSlot(iso) {
 // ---------- day files ----------
 const days = new Map(); // "date/key" -> { key, date, lanes: Map("dir:lane" -> accumulator) }
 
+// Typed arrays: 17 bytes per interval instead of 40 for plain arrays of numbers.
 function newLane(dir, lane) {
-  const z = () => new Array(SLOTS).fill(0);
-  return { dir, lane, n: z(), m: z(), nv: z(), inv: z(), sum: z() };
+  const f = () => new Float32Array(SLOTS);
+  return { dir, lane, n: f(), m: new Uint8Array(SLOTS), nv: f(), inv: f(), sum: f() };
 }
 
 async function dayFile(date, key) {
@@ -263,26 +274,30 @@ async function dayFile(date, key) {
   return day;
 }
 
+// Writes the changed day files. Polling goes on meanwhile: each file is serialized in one go and
+// marked clean first, so minutes added while it is compressed and written mark it changed again.
 async function writeDays() {
   let written = 0;
-  for (const day of days.values()) {
+  const round = (a) => Array.from(a, (x) => Math.round(x * 100) / 100);
+  for (const day of [...days.values()]) {
     if (!day.dirty) continue;
+    day.dirty = false;
     const lanes = [...day.lanes.values()]
       .sort((a, b) => a.dir - b.dir || a.lane - b.lane)
       .map(({ dir, lane, n, m, nv, inv, sum }) => ({
-        lane, dir, n, m, nv,
-        vh: nv.map((k, i) => (k && inv[i] ? Math.round((k / inv[i]) * 10) : 0)),
-        va: nv.map((k, i) => (k ? Math.round((sum[i] / k) * 10) : 0)),
+        lane, dir, n: round(n), m: Array.from(m), nv: round(nv),
+        vh: Array.from(nv, (k, i) => (k && inv[i] ? Math.round((k / inv[i]) * 10) : 0)),
+        va: Array.from(nv, (k, i) => (k ? Math.round((sum[i] / k) * 10) : 0)),
       }));
+    const json = JSON.stringify({ key: day.key, date: day.date, interval: INTERVAL, lanes });
     const file = path.join(OUT, "fd", day.date, `${day.key}.json`);
     await mkdir(path.dirname(file), { recursive: true });
-    await writeFile(file, gzipSync(JSON.stringify({ key: day.key, date: day.date, interval: INTERVAL, lanes }), { level: 9 }));
-    day.dirty = false;
+    await writeFile(file, await gzipAsync(json, { level: 6 }));
     written++;
   }
-  // Days before yesterday are complete; drop them from memory.
-  const yesterday = localSlot(new Date(Date.now() - 86_400_000).toISOString()).date;
-  for (const [id, day] of days) if (day.date < yesterday && !day.dirty) days.delete(id);
+  // Only today stays in memory; a late minute for an earlier day reads its file again.
+  const today = localSlot(new Date().toISOString()).date;
+  for (const [id, day] of days) if (day.date !== today && !day.dirty) days.delete(id);
   // And delete the folders the page no longer shows.
   const cutoff = localSlot(new Date(Date.now() - (KEEP_DAYS - 1) * 86_400_000).toISOString()).date;
   for (const dir of await readdir(path.join(OUT, "fd")).catch(() => [])) {
@@ -342,7 +357,7 @@ async function readJson(file, fallback) {
   let buf;
   try { buf = await readFile(file); }
   catch (e) { if (e.code === "ENOENT") return fallback; throw e; }
-  if (buf[0] === 0x1f && buf[1] === 0x8b) buf = gunzipSync(buf);
+  if (buf[0] === 0x1f && buf[1] === 0x8b) buf = await gunzipAsync(buf);
   return JSON.parse(buf.toString("utf8"));
 }
 
@@ -371,7 +386,7 @@ async function main() {
   const lastTime = new Map(Object.entries(await readJson(stateFile, {})));
 
   const stopAt = MINUTES > 0 ? Date.now() + MINUTES * 60_000 : Infinity;
-  let etag = null, polls = 0, minutes = 0, failures = 0, lastFlush = Date.now(), lastLive = 0;
+  let etag = null, polls = 0, minutes = 0, failures = 0, lastFlush = Date.now(), lastUpload = Date.now(), lastLive = 0;
   log(`Collecting ${stations.length} stations (${bySite.size} sites) ${MINUTES > 0 ? `for ${MINUTES} minutes` : "until stopped"}`);
 
   // A service is stopped with SIGTERM: write what was collected since the last flush, then exit.
@@ -431,10 +446,17 @@ async function main() {
       await writeFile(path.join(OUT, "live.json"), JSON.stringify(liveJson(stations)));
       runHook("live", args["on-live"]);
     }
-    if (Date.now() - lastFlush >= FLUSH_EVERY * 60_000) {
+    // Written in the background, so a slow SD card does not hold up the next poll.
+    if (!flushing && Date.now() - lastFlush >= FLUSH_EVERY * 60_000) {
       lastFlush = Date.now();
-      await flush(stateFile, lastTime);
-      runHook("flush", args["on-flush"]);
+      flushing = flush(stateFile, lastTime)
+        .then(() => {
+          if (Date.now() - lastUpload < UPLOAD_EVERY * 60_000) return;
+          lastUpload = Date.now();
+          runHook("flush", args["on-flush"]);
+        })
+        .catch((e) => log(`Writing the files failed: ${e.message}`))
+        .finally(() => { flushing = null; });
     }
     // NDW writes a new file about 10 seconds past each minute.
     const wait = POLL_MS - (Date.now() - started);
@@ -445,7 +467,10 @@ async function main() {
   if (!stopping) await finish(stations, stateFile, lastTime, polls, minutes);
 }
 
+let flushing = null; // the running flush, if any
+
 async function finish(stations, stateFile, lastTime, polls, minutes) {
+  if (flushing) await flushing;
   await flush(stateFile, lastTime);
   await writeFile(path.join(OUT, "live.json"), JSON.stringify(liveJson(stations)));
   log(`Done: ${polls} polls, ${minutes} site-minutes`);
@@ -456,8 +481,10 @@ async function finish(stations, stateFile, lastTime, polls, minutes) {
 }
 
 async function flush(stateFile, lastTime) {
+  // The minutes counted so far; those counted while the files are written are in the next flush.
+  const state = JSON.stringify(Object.fromEntries(lastTime));
   const written = await writeDays();
-  await writeFile(stateFile, JSON.stringify(Object.fromEntries(lastTime)));
+  await writeFile(stateFile, state);
   const yesterday = localSlot(new Date(Date.now() - 86_400_000).toISOString()).date;
   // "end" is the newest complete day, like the Finnish meta.json.
   await writeFile(path.join(OUT, "meta.json"), JSON.stringify({ updated: new Date().toISOString(), end: yesterday.replace(/-/g, "") }));

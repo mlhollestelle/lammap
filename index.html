@@ -542,13 +542,13 @@ async function fetchStationsFi() {
   return { stations, summary: `${stations.length} stations (${active} active, ${stations.length - active} temporarily removed, grey)` };
 }
 
-// The Netherlands: the stations scripts/collect-nl.mjs collects, each a pair of MONIBAS detectors on
-// the two carriageways of a motorway.
+// The Netherlands: the stations scripts/collect-nl.mjs collects, each a pair of Rijkswaterstaat MONIBAS
+// detectors on the two carriageways of a national road.
 async function fetchStationsNl() {
   const res = await fetch(`${C.data}/stations.json`);
   if (!res.ok) throw new Error(res.status === 404 ? "no Dutch data collected yet" : `HTTP ${res.status}`);
   const stations = (await res.json()).map((s) => ({ ...s, collectionStatus: "GATHERING" }));
-  return { stations, summary: `${stations.length} motorway locations, both carriageways (a selection of NDW's detectors)` };
+  return { stations, summary: `${stations.length} locations on national roads, both carriageways` };
 }
 
 async function loadStations() {

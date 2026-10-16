@@ -1,6 +1,6 @@
 # Collecting the Dutch data on a Raspberry Pi
 
-NDW only publishes the latest minute, so something has to fetch it every minute, around the clock. This sets up `scripts/collect-nl.mjs` as a service on a Raspberry Pi (a Zero 2 W is enough: the collector uses about 150 MB of memory and a second or two of CPU per minute). It downloads about 1 MB a minute from NDW and uploads the results to the R2 bucket the page reads.
+NDW only publishes the latest minute, so something has to fetch it every minute, around the clock. This sets up `scripts/collect-nl.mjs` as a service on a Raspberry Pi. It collects all national roads: about 2,600 locations with detectors on both carriageways, 14,500 lanes. A Zero 2 W is enough: the collector uses about 250 MB of memory and a few seconds of CPU per minute. It downloads about 1 MB a minute from NDW, writes the day files to the SD card every hour (about 20 MB at the end of the day) and uploads them to the R2 bucket the page reads every 2 hours. The live dots are uploaded every 5 minutes.
 
 ## 1. The Pi
 
@@ -36,7 +36,7 @@ cd ~/lammap
 node scripts/collect-nl.mjs --minutes 3 --out ~/lammap-data/nl
 ```
 
-The first run downloads NDW's site table and picks 250 stations, which takes a minute or so on a Zero. After three minutes it writes the files and stops. To test the upload too:
+The first run downloads NDW's site table and pairs up the detectors into stations, which takes a minute or so on a Zero. After three minutes it writes the files and stops. To test the upload too:
 
 ```sh
 OUT=~/lammap-data/nl R2_DEST=r2:BUCKET scripts/upload-nl.sh fd
@@ -51,7 +51,7 @@ The Netherlands should now show up at <https://mlhollestelle.github.io/lammap/?c
 sed "s/__USER__/$USER/g; s/__BUCKET__/BUCKET/g" pi/lammap-nl.service | sudo tee /etc/systemd/system/lammap-nl.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now lammap-nl
-journalctl -u lammap-nl -f   # the log: a line every 30 minutes, plus each upload of the day files
+journalctl -u lammap-nl -f   # the log: a line every 30 polls and one each time the day files are written
 ```
 
 It starts again after a reboot or a crash. When stopped (`sudo systemctl stop lammap-nl`) it writes and uploads what it has first. Collected data stays in `~/lammap-data/nl`, so a restart continues where it left off; only the minutes while it was down are missing, and the page scales those hours up or leaves them out.
@@ -62,6 +62,10 @@ To update after changes in the repository:
 cd ~/lammap && git pull && sudo systemctl restart lammap-nl
 ```
 
-## Choosing other stations
+## Uploads and costs
 
-Stop the service and run `node scripts/collect-nl.mjs --select --stations 400 --minutes 1 --out ~/lammap-data/nl`, then start it again. Stations that are not picked again lose their history on the page. More stations means more memory, CPU and uploads; 250 keeps the uploads to about 12,000 a day, within R2's free tier.
+Every station's file changes all day, so each upload of the day files is about 2,600 uploads to R2. Every 2 hours that is about 31,000 a day, 0.95 million a month, just within R2's free tier of 1 million writes a month (the Finnish data adds about 30,000). More often costs a little: `--upload-every 60` in the service file doubles it, to about €4 a month above the free tier.
+
+## Fewer stations
+
+To collect only part of them, stop the service and run `node scripts/collect-nl.mjs --select --stations 500 --minutes 1 --out ~/lammap-data/nl`, then start it again. That picks 500 stations spread over the country; stations that are not picked lose their history on the page. Without `--stations` (or `--stations 0`) `--select` takes all of them again, for example when Rijkswaterstaat adds detectors.
