@@ -252,12 +252,16 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
   .split { display: flex; height: 10px; border-radius: var(--radius-pill); overflow: hidden; margin: 8px 0 4px; gap: 2px; }
   .foot { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 12px; line-height: 18px; color: var(--ink-muted); }
   .foot a, .leaflet-container .foot a { color: var(--pink-text); text-underline-offset: 3px; }
-  .links { display: flex; gap: 16px; padding-top: 2px; }
+  .links { display: flex; align-items: center; gap: 16px; padding-top: 2px; }
   .links a { color: var(--ink-muted); display: inline-flex; }
   .links a:hover { color: var(--ink); }
   .links svg { width: 18px; height: 18px; fill: currentColor; }
   .links button { border: 0; padding: 0; min-height: 0; color: var(--ink-muted); display: inline-flex; }
   .links button:hover:not(:disabled) { transform: none; box-shadow: none; color: var(--ink); }
+  #country {
+    height: 28px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+    background: var(--surface-raised); color: var(--ink); font: 500 12px/1 var(--font-mono); cursor: pointer;
+  }
   .links button svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
   /* The button shows the theme it switches to */
   #themeToggle .moon, :root[data-theme="dark"] #themeToggle .sun { display: block; }
@@ -353,7 +357,7 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
 <aside id="panel">
   <header class="head">
     <div class="brand">
-      <div class="label">LAM traffic counters · Finland</div>
+      <div class="label" id="brandLabel">LAM traffic counters</div>
       <h1>lammap</h1>
       <div class="sub" id="stationCount">Loading stations…</div>
     </div>
@@ -362,6 +366,10 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
       <ul id="results"></ul>
     </div>
     <div class="links">
+      <select id="country" aria-label="Country">
+        <option value="fi">Finland</option>
+        <option value="nl">Netherlands</option>
+      </select>
       <button type="button" id="themeToggle" aria-label="Toggle dark mode" title="Toggle dark mode">
         <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
         <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.5"/><path d="M12 1.5v2.5M12 20v2.5M1.5 12H4M20 12h2.5M4.6 4.6l1.8 1.8M17.6 17.6l1.8 1.8M4.6 19.4l1.8-1.8M17.6 6.4l1.8-1.8"/></svg>
@@ -387,19 +395,48 @@ const API = "https://tie.digitraffic.fi/api/tms/v1";
 // page at another copy, e.g. data/ from the ingest scripts: run `python3 -m http.server` in the
 // repository and open http://localhost:8000/?data=data
 const DATA = new URLSearchParams(location.search).get("data") ?? "https://pub-7ef605d5211f4ee0aca2e94617311d5a.r2.dev";
-// 5-minute per-lane files from scripts/ingest-fd.mjs.
-const FD = `${DATA}/fd`;
+// Each country has its own stations, data files and live values. "?country=nl" switches to the
+// Netherlands; without it the page shows Finland.
+const COUNTRIES = {
+  fi: {
+    name: "Finland",
+    title: "LAM traffic counters",
+    view: [[64.5, 26], 5],
+    tz: "Europe/Helsinki",
+    tzName: "Finnish time",
+    data: DATA,
+    // 5-minute per-lane files from scripts/ingest-fd.mjs.
+    fd: `${DATA}/fd`,
+    ranges: [30, 365],
+    attribution: 'Data: Fintraffic / <a href="https://www.digitraffic.fi/">Digitraffic</a>, CC BY 4.0',
+  },
+  nl: {
+    name: "Netherlands",
+    title: "NDW traffic counters",
+    view: [[52.2, 5.3], 8],
+    tz: "Europe/Amsterdam",
+    tzName: "Dutch time",
+    data: `${DATA}/nl`,
+    // 5-minute per-lane files from scripts/collect-nl.mjs; the daily charts are built from them too.
+    fd: `${DATA}/nl/fd`,
+    ranges: [7],
+    attribution: 'Data: <a href="https://www.ndw.nu/">NDW</a> open data',
+  },
+};
+const COUNTRY = new URLSearchParams(location.search).get("country") === "nl" ? "nl" : "fi";
+const C = COUNTRIES[COUNTRY];
+const FD = C.fd;
 const FD_DAYS = 7;
-const RANGES = [30, 365];
+const RANGES = C.ranges;
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const fmt = new Intl.NumberFormat("en-US");
 
-// ---------- dates (Finnish local date, since the reports use Finnish days) ----------
-function helsinkiToday() {
-  // en-CA formats as YYYY-MM-DD
-  const s = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Helsinki" }).format(new Date());
-  const [y, m, d] = s.split("-").map(Number);
+// ---------- dates (local date of the country, since the data uses local days) ----------
+// en-CA formats as YYYY-MM-DD
+const localDate = (date) => new Intl.DateTimeFormat("en-CA", { timeZone: C.tz }).format(date);
+function localToday() {
+  const [y, m, d] = localDate(new Date()).split("-").map(Number);
   return new Date(Date.UTC(y, m - 1, d));
 }
 function addDays(date, n) { return new Date(date.getTime() + n * 86400000); }
@@ -409,7 +446,7 @@ function fromKey(k) { return new Date(Date.UTC(+k.slice(0, 4), +k.slice(4, 6) - 
 
 // The selected window ends at the newest day in the data (from meta.json), or yesterday
 // if that can't be loaded. "days" is the selected window length, kept when switching station.
-let END = addDays(helsinkiToday(), -1);
+let END = addDays(localToday(), -1);
 let updated = null;
 let days = RANGES[0];
 function windowDates() {
@@ -419,7 +456,7 @@ function windowDates() {
 
 async function loadMeta() {
   try {
-    const res = await fetch(`${DATA}/meta.json`);
+    const res = await fetch(`${C.data}/meta.json`);
     if (!res.ok) return;
     const meta = await res.json();
     END = fromKey(meta.end);
@@ -428,13 +465,13 @@ async function loadMeta() {
 }
 
 // ---------- map ----------
-const map = L.map("map", { preferCanvas: true }).setView([64.5, 26], 5);
+const map = L.map("map", { preferCanvas: true }).setView(...C.view);
 // OSM's tile usage policy requires a valid Referer header; tiles requested
 // without one are served as an "access blocked" image.
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 18,
   referrerPolicy: "strict-origin-when-cross-origin",
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Data: Fintraffic / <a href="https://www.digitraffic.fi/">Digitraffic</a>, CC BY 4.0',
+  attribution: `&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · ${C.attribution}`,
 }).addTo(map);
 
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
@@ -470,32 +507,63 @@ document.getElementById("themeToggle").addEventListener("click", () => {
 darkQuery.addEventListener("change", themeChanged);
 document.getElementById("themeToggle").setAttribute("aria-pressed", String(isDark()));
 
+// ---------- country ----------
+// Switching reloads the page for the other country; Finland keeps the plain URL.
+const countryEl = document.getElementById("country");
+countryEl.value = COUNTRY;
+countryEl.addEventListener("change", () => {
+  const p = new URLSearchParams(location.search);
+  if (countryEl.value === "fi") p.delete("country"); else p.set("country", countryEl.value);
+  location.href = `${location.pathname}${p.size ? `?${p}` : ""}`;
+});
+document.getElementById("brandLabel").textContent = `${C.title} · ${C.name}`;
+if (COUNTRY === "nl") document.getElementById("search").placeholder = "Search by road, e.g. A2";
+document.title = `lammap · ${C.title}`;
+
 function prettyName(name) { return name.replace(/_/g, " "); }
+// "key" identifies a station in file names and the URL hash; "code" is shown next to its name.
+const stationLabel = (st) => (st.code ? `${st.code} · ${prettyName(st.name)}` : st.name);
+
+// Finland: the station list comes straight from Digitraffic.
+async function fetchStationsFi() {
+  const res = await fetch(`${API}/stations`, { headers: { "Digitraffic-User": "lammap" } });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const stations = (await res.json()).features.map((f) => ({
+    id: f.id,
+    tms: f.properties.tmsNumber, // the history API is keyed by tmsNumber, NOT by feature id
+    key: String(f.properties.tmsNumber),
+    code: f.properties.tmsNumber,
+    name: f.properties.name,
+    collectionStatus: f.properties.collectionStatus,
+    lat: f.geometry.coordinates[1],
+    lon: f.geometry.coordinates[0],
+  }));
+  const active = stations.filter((s) => s.collectionStatus === "GATHERING").length;
+  return { stations, summary: `${stations.length} stations (${active} active, ${stations.length - active} temporarily removed, grey)` };
+}
+
+// The Netherlands: the stations scripts/collect-nl.mjs collects, each a pair of Rijkswaterstaat MONIBAS
+// detectors on the two carriageways of a national road.
+async function fetchStationsNl() {
+  const res = await fetch(`${C.data}/stations.json`);
+  if (!res.ok) throw new Error(res.status === 404 ? "no Dutch data collected yet" : `HTTP ${res.status}`);
+  const stations = (await res.json()).map((s) => ({ ...s, collectionStatus: "GATHERING" }));
+  return { stations, summary: `${stations.length} locations on national roads, both carriageways` };
+}
 
 async function loadStations() {
   try {
-    const [res] = await Promise.all([fetch(`${API}/stations`, { headers: { "Digitraffic-User": "lammap" } }), loadMeta()]);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const gj = await res.json();
-    stations = gj.features.map((f) => ({
-      id: f.id,
-      tms: f.properties.tmsNumber, // the history API is keyed by tmsNumber, NOT by feature id
-      name: f.properties.name,
-      collectionStatus: f.properties.collectionStatus,
-      lat: f.geometry.coordinates[1],
-      lon: f.geometry.coordinates[0],
-    }));
+    const [list] = await Promise.all([COUNTRY === "nl" ? fetchStationsNl() : fetchStationsFi(), loadMeta()]);
+    stations = list.stations;
     for (const st of stations) {
       st.marker = L.circleMarker([st.lat, st.lon], markerStyle(st, false))
-        .bindTooltip(`${st.tms} · ${prettyName(st.name)}`)
+        .bindTooltip(stationLabel(st))
         .on("click", () => selectStation(st))
         .addTo(map);
     }
-    const active = stations.filter((s) => s.collectionStatus === "GATHERING").length;
-    document.getElementById("stationCount").textContent =
-      `${stations.length} stations (${active} active, ${stations.length - active} temporarily removed, grey)`;
-    const fromHash = Number(location.hash.slice(1));
-    const initial = stations.find((s) => s.tms === fromHash);
+    document.getElementById("stationCount").textContent = list.summary;
+    const fromHash = decodeURIComponent(location.hash.slice(1));
+    const initial = stations.find((s) => s.key === fromHash);
     if (initial) { selectStation(initial); map.setView([initial.lat, initial.lon], 10); }
   } catch (e) {
     document.getElementById("stationCount").innerHTML =
@@ -511,11 +579,11 @@ searchEl.addEventListener("input", () => {
   resultsEl.innerHTML = "";
   if (!q) return;
   const hits = stations
-    .filter((s) => String(s.tms) === q || prettyName(s.name).toLowerCase().includes(q))
+    .filter((s) => s.key.toLowerCase() === q || prettyName(s.name).toLowerCase().includes(q))
     .slice(0, 30);
   for (const s of hits) {
     const li = document.createElement("li");
-    li.textContent = `${s.tms} · ${prettyName(s.name)}`;
+    li.textContent = stationLabel(s);
     li.onclick = () => {
       map.setView([s.lat, s.lon], 11);
       selectStation(s);
@@ -566,9 +634,41 @@ function toReport(json) {
   return { ...maps, hasDirections };
 }
 
+// Dutch day files (scripts/collect-nl.mjs) hold 5-minute vehicle counts per lane, with the minutes
+// of data in each interval. They are summed per hour and scaled up to 60 minutes; an hour with less
+// than half its minutes is missing, and so is a day with a missing hour.
+const MIN_MINUTES_PER_HOUR = 30;
+function toReportNl(fdDays) {
+  const maps = { all: new Map(), d1: new Map(), d2: new Map() };
+  for (const day of fdDays) {
+    for (const dir of [1, 2]) {
+      const lanes = day.lanes.filter((l) => l.dir === dir);
+      if (!lanes.length) continue;
+      const hours = [];
+      for (let h = 0; h < 24; h++) {
+        let n = 0, m = 0;
+        for (let i = h * 12; i < h * 12 + 12; i++) {
+          n += lanes.reduce((a, l) => a + l.n[i], 0);
+          m += Math.max(...lanes.map((l) => l.m[i])); // minutes in which the direction reported
+        }
+        hours.push(m >= MIN_MINUTES_PER_HOUR ? (n * 60) / Math.min(m, 60) : null);
+      }
+      if (hours.includes(null)) continue;
+      maps[`d${dir}`].set(key(day.date), { hours, total: hours.reduce((a, b) => a + b, 0) });
+    }
+  }
+  for (const [k, v] of maps.d1) {
+    const w = maps.d2.get(k);
+    if (w) maps.all.set(k, { hours: v.hours.map((x, i) => x + w.hours[i]), total: v.total + w.total });
+  }
+  return { ...maps, hasDirections: maps.d1.size > 0 && maps.d2.size > 0 };
+}
+
 // Direction names ("towards Helsinki") from the station metadata. Best effort.
+// Dutch carriageways: "Re" (right) runs with the hectometre numbering, "Li" (left) against it.
 const dirNameCache = new Map();
 async function fetchDirectionNames(st) {
+  if (COUNTRY === "nl") return [`${st.road} Re (km ↑)`, `${st.road} Li (km ↓)`];
   if (dirNameCache.has(st.id)) return dirNameCache.get(st.id);
   let names = ["Direction 1", "Direction 2"];
   try {
@@ -583,13 +683,27 @@ async function fetchDirectionNames(st) {
   return names;
 }
 
-async function fetchReport(tms) {
-  if (cache.has(tms)) return cache.get(tms);
-  const res = await fetch(`${DATA}/stations/${tms}.json`);
-  if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
-  const report = toReport(res.ok ? await res.json() : {}); // 404: station not ingested yet
-  cache.set(tms, report);
+async function fetchReport(st) {
+  if (cache.has(st.key)) return cache.get(st.key);
+  let report;
+  if (COUNTRY === "nl") {
+    report = toReportNl(await fetchFd(st.key));
+  } else {
+    const res = await fetch(`${DATA}/stations/${st.key}.json`);
+    if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
+    report = toReport(res.ok ? await res.json() : {}); // 404: station not ingested yet
+  }
+  cache.set(st.key, report);
   return report;
+}
+
+// The day files are stored gzipped and served with Content-Encoding: gzip, so the browser unpacks
+// them. A plain static server (python3 -m http.server on the scripts' output) sends the gzip bytes
+// as they are; those are unpacked here.
+async function readJson(res) {
+  const buf = new Uint8Array(await res.arrayBuffer());
+  if (buf[0] !== 0x1f || buf[1] !== 0x8b) return JSON.parse(new TextDecoder().decode(buf));
+  return new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).json();
 }
 
 function mean(arr) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : NaN; }
@@ -621,7 +735,7 @@ let requestSeq = 0;
 function headHtml(st) {
   return `
     <h2>${escapeHtml(prettyName(st.name))}</h2>
-    <div class="sub">Station ${st.tms}${st.collectionStatus !== "GATHERING" ? " · temporarily removed" : ""}
+    <div class="sub">${COUNTRY === "nl" ? `Detectors ${escapeHtml(st.sites[1].replace(/^RWS01_MONIBAS_/, ""))} and ${escapeHtml(st.sites[2].replace(/^RWS01_MONIBAS_/, ""))}` : `Station ${st.tms}`}${st.collectionStatus !== "GATHERING" ? " · temporarily removed" : ""}
       · ${fmtDate(windowDates()[0])} – ${fmtDate(END)}</div>`;
 }
 
@@ -630,14 +744,14 @@ async function selectStation(st) {
   st.marker.station = st;
   st.marker.setStyle(markerStyle(st, true)).bringToFront();
   selectedMarker = st.marker;
-  history.replaceState(null, "", `#${st.tms}`);
+  history.replaceState(null, "", `${location.search}#${encodeURIComponent(st.key)}`);
 
   const seq = ++requestSeq;
   const detail = document.getElementById("detail");
   detail.innerHTML = headHtml(st) + '<p class="muted">Loading traffic data…</p>';
 
   try {
-    const [report, dirNames] = await Promise.all([fetchReport(st.tms), fetchDirectionNames(st)]);
+    const [report, dirNames] = await Promise.all([fetchReport(st), fetchDirectionNames(st)]);
     if (seq !== requestSeq) return; // a newer click won
     if (!report.hasDirections) selectedDir = "all";
     renderDetail(st, report, dirNames);
@@ -672,9 +786,15 @@ function renderDetail(st, report, dirNames) {
   });
   if (!view.all.nDays) {
     current = null;
+    // The Dutch data is collected by lammap itself, so a new station has no complete day yet; the
+    // fundamental diagram already shows what has been collected.
     detail.innerHTML = headHtml(st) + rangeSeg +
-      `<p class="muted">No traffic data published for this station in the last ${days} days.</p>`;
+      `<p class="muted">${COUNTRY === "nl"
+        ? `No complete day collected for this station in the last ${days} days yet.`
+        : `No traffic data published for this station in the last ${days} days.`}</p>
+      <div class="dash"><div class="col" id="fd"><h3>Fundamental diagram</h3><p class="muted">Loading lane data…</p></div></div>`;
     wireRange();
+    showFd(st, dirNames);
     return;
   }
 
@@ -725,7 +845,7 @@ function renderDetail(st, report, dirNames) {
     <div class="dash">
     <div class="col">
     <h3>Average hourly distribution</h3>
-    <div class="sub">Average vehicles per hour of day (Finnish time)</div>
+    <div class="sub">Average vehicles per hour of day (${C.tzName})</div>
     ${stacked ? `<div class="legend">
       <span><i style="background:var(--dir-1)"></i>${escapeHtml(dirNames[0])}</span>
       <span><i style="background:var(--dir-2)"></i>${escapeHtml(dirNames[1])}</span>
@@ -744,9 +864,12 @@ function renderDetail(st, report, dirNames) {
     <div class="col" id="fd"><h3>Fundamental diagram</h3><p class="muted">Loading lane data…</p></div>
     </div>
 
-    <div class="foot">
+    <div class="foot">${COUNTRY === "nl" ? `
+      Source: <a href="https://opendata.ndw.nu/">NDW open data</a>, minute values of Rijkswaterstaat's MONIBAS loop detectors,
+      collected every minute by lammap and summed per hour${updated ? ` (last update ${fmtDateTime(updated)})` : ""}.
+      An hour with gaps is scaled up from the minutes collected; one with less than ${MIN_MINUTES_PER_HOUR} minutes leaves its day out.` : `
       Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes), updated daily${updated ? `, last on ${fmtDate(updated)}` : ""}.
-      <a href="${historyUrl(st.tms)}">Download CSV</a>
+      <a href="${historyUrl(st.tms)}">Download CSV</a>`}
     </div>`;
   detail.querySelectorAll("[data-dir]").forEach((b) => {
     b.onclick = () => {
@@ -835,19 +958,21 @@ document.fonts?.ready.then(() => { if (fdState?.dirs) drawFd(); });
 // ---------- fundamental diagram ----------
 const fdCache = new Map();
 
-// The last FD_DAYS day files of a station; days without a file are left out.
-async function fetchFd(tms) {
-  if (fdCache.has(tms)) return fdCache.get(tms);
-  const dates = Array.from({ length: FD_DAYS }, (_, i) => addDays(END, -(FD_DAYS - 1) + i));
-  const days = await Promise.all(dates.map(async (date) => {
-    try {
-      const res = await fetch(`${FD}/${iso(date)}/${tms}.json`);
-      return res.ok ? { date, lanes: (await res.json()).lanes } : null;
-    } catch (e) { return null; }
-  }));
-  const out = days.filter(Boolean);
-  fdCache.set(tms, out);
-  return out;
+// The last FD_DAYS day files of a station; days without a file are left out. The Dutch data is
+// collected through the day, so there today's file (so far) comes too. The promise is cached, as
+// the Dutch daily charts are built from the same files.
+function fetchFd(stKey) {
+  if (!fdCache.has(stKey)) {
+    const n = FD_DAYS + (COUNTRY === "nl" ? 1 : 0);
+    const dates = Array.from({ length: n }, (_, i) => addDays(END, -(FD_DAYS - 1) + i));
+    fdCache.set(stKey, Promise.all(dates.map(async (date) => {
+      try {
+        const res = await fetch(`${FD}/${iso(date)}/${encodeURIComponent(stKey)}.json`);
+        return res.ok ? { date, lanes: (await readJson(res)).lanes } : null;
+      } catch (e) { return null; }
+    })).then((days) => days.filter(Boolean)));
+  }
+  return fdCache.get(stKey);
 }
 
 const FD_MODES = {
@@ -864,11 +989,25 @@ let fdMode = "qv";
 let fdState = null;
 
 // Latest real-time values of the selected station, refreshed every minute while the page is visible.
-// The fixed 5-minute lane flows update every 5 minutes; speeds are rolling.
+// Finland: the fixed 5-minute lane flows update every 5 minutes; speeds are rolling.
+// The Netherlands: scripts/collect-nl.mjs writes the last 5 minutes of every lane to live.json every
+// 5 minutes, a few minutes behind real time (NDW publishes each minute about 3 minutes late).
 const LIVE_REFRESH_MS = 60_000;
 const LIVE_MAX_AGE_MS = 30 * 60_000; // older values mean the station stopped reporting
-let live = null; // { id, values: Map(sensor name -> sensor value) }
+let live = null; // { id, values: Map(sensor name -> sensor value) }, in the Netherlands Map("dir:lane" -> value)
 let liveTimer = null;
+
+async function fetchLive(id) {
+  if (COUNTRY === "nl") {
+    const res = await fetch(`${C.data}/live.json`, { cache: "no-cache" });
+    if (!res.ok) return null;
+    const lanes = (await res.json()).stations?.[id] ?? [];
+    return new Map(lanes.map((v) => [`${v.dir}:${v.lane}`, v]));
+  }
+  const res = await fetch(`${API}/stations/${id}/data`, { headers: { "Digitraffic-User": "lammap" } });
+  if (!res.ok) return null;
+  return new Map(((await res.json()).sensorValues || []).map((v) => [v.name, v]));
+}
 
 function startLive(id) {
   if (live?.id === id && liveTimer) return;
@@ -876,9 +1015,9 @@ function startLive(id) {
   live = { id, values: null };
   const tick = async () => {
     try {
-      const res = await fetch(`${API}/stations/${id}/data`, { headers: { "Digitraffic-User": "lammap" } });
-      if (!res.ok || live?.id !== id) return;
-      live.values = new Map(((await res.json()).sensorValues || []).map((v) => [v.name, v]));
+      const values = await fetchLive(id);
+      if (!values || live?.id !== id) return;
+      live.values = values;
       if (fdState?.id === id) drawFd();
     } catch (e) { /* keep the previous values */ }
   };
@@ -902,6 +1041,11 @@ document.addEventListener("visibilitychange", () => {
 function livePoint(l) {
   const vals = live?.values;
   if (!vals) return null;
+  if (COUNTRY === "nl") {
+    const p = vals.get(l.id);
+    if (!(p?.q > 0) || !(p?.v > 0) || Date.now() - new Date(p.end) > LIVE_MAX_AGE_MS) return null;
+    return { q: p.q, v: p.v, k: p.q / p.v, laneSpeed: true, start: p.start, end: p.end };
+  }
   const q = vals.get(`OHITUKSET_5MIN_KIINTEA_KAISTA${l.lane}`);
   const laneV = vals.get(`LIUKUVA_NOPEUS_KAISTA_${l.lane}`);
   const sv = laneV?.value > 0 ? laneV : vals.get(`KESKINOPEUS_5MIN_LIUKUVA_SUUNTA${l.dir}`);
@@ -909,7 +1053,7 @@ function livePoint(l) {
   if (Date.now() - new Date(q.measuredTime) > LIVE_MAX_AGE_MS) return null;
   return { q: q.value, v: sv.value, k: q.value / sv.value, laneSpeed: sv === laneV, start: q.timeWindowStart, end: q.timeWindowEnd };
 }
-const clock = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Helsinki", hour: "2-digit", minute: "2-digit" });
+const clock = new Intl.DateTimeFormat("en-GB", { timeZone: C.tz, hour: "2-digit", minute: "2-digit" });
 
 // Builds one point per lane per 5-minute interval: flow q = n × 12 veh/h, speed v = harmonic
 // mean (the space-mean speed estimate), density k = q / v.
@@ -925,16 +1069,18 @@ function fdLanes(days) {
       const lane = byId.get(id);
       l.n.forEach((n, i) => {
         if (!n || !l.vh[i]) return;
-        const q = n * 12, v = l.vh[i] / 10;
+        // Dutch intervals can have fewer than 5 minutes of data (l.m); the flow is over those minutes.
+        const q = l.m ? (n * 60) / Math.min(l.m[i], 5) : n * 12, v = l.vh[i] / 10;
         lane.total += n;
-        lane.points.push({ q, v, k: q / v, heavy: l.heavy[i] / n, date: day.date, slot: i });
+        lane.points.push({ q, v, k: q / v, heavy: l.heavy ? l.heavy[i] / n : null, date: day.date, slot: i });
       });
     }
   }
   const dirs = { 1: [], 2: [] };
   for (const lane of byId.values()) if (dirs[lane.dir]) dirs[lane.dir].push(lane);
   for (const [d, lanes] of Object.entries(dirs)) {
-    lanes.sort((a, b) => (d === "1" ? a.lane - b.lane : b.lane - a.lane));
+    // Dutch lanes are numbered from the left in each direction, so the highest number is the right lane.
+    lanes.sort((a, b) => (d === "1" && COUNTRY !== "nl" ? a.lane - b.lane : b.lane - a.lane));
     const total = lanes.reduce((s, l) => s + l.total, 0);
     lanes.forEach((l, i) => {
       l.color = `--lane-${Math.min(i + 1, 5)}`;
@@ -949,12 +1095,13 @@ async function showFd(st, dirNames) {
   const el = document.getElementById("fd");
   if (!el) return;
   const seq = requestSeq;
-  if (!fdState || fdState.tms !== st.tms) {
+  if (!fdState || fdState.key !== st.key) {
     stopLive();
-    fdState = { tms: st.tms, id: st.id, hidden: null, dirs: null };
+    // Live values are keyed by Digitraffic's station id in Finland and by the station key in the Netherlands.
+    fdState = { key: st.key, id: COUNTRY === "nl" ? st.key : st.id, hidden: null, dirs: null };
   }
   if (!fdState.dirs) {
-    const days = await fetchFd(st.tms);
+    const days = await fetchFd(st.key);
     if (seq !== requestSeq || !document.getElementById("fd")) return;
     if (!days.length) {
       // No lane data: the daily charts get the whole width.
@@ -965,11 +1112,19 @@ async function showFd(st, dirNames) {
     }
     fdState.dirs = fdLanes(days);
     fdState.nDays = days.length;
+    fdState.hasToday = days.some((d) => iso(d.date) === iso(localToday()));
     fdState.hidden = new Set(Object.values(fdState.dirs).flat().filter((l) => l.minor).map((l) => l.id));
   }
   fdState.dirNames = dirNames;
   renderFd();
-  startLive(st.id);
+  startLive(fdState.id);
+}
+
+// The Dutch files can include today's (so far).
+function fdPeriod(nDays, hasToday) {
+  const n = nDays - (hasToday ? 1 : 0);
+  const past = `last ${n} day${n === 1 ? "" : "s"}`;
+  return hasToday ? (n ? `${past} and today` : "today") : past;
 }
 
 function renderFd() {
@@ -978,8 +1133,10 @@ function renderFd() {
   const shown = ["1", "2"].filter((d) => dirs[d].length && (selectedDir === "all" || selectedDir === `d${d}`));
   el.innerHTML = `
     <h3>Fundamental diagram</h3>
-    <div class="sub">One dot per lane per 5 minutes, last ${nDays} day${nDays === 1 ? "" : "s"}.
-      Speed is the harmonic mean; density is flow ÷ speed. From Digitraffic's raw per-vehicle data.</div>
+    <div class="sub">One dot per lane per 5 minutes, ${fdPeriod(nDays, fdState.hasToday)}.
+      ${COUNTRY === "nl"
+        ? "Speed is the harmonic mean of the minute speeds; density is flow ÷ speed. From NDW's minute data per lane."
+        : "Speed is the harmonic mean; density is flow ÷ speed. From Digitraffic's raw per-vehicle data."}</div>
     <div class="seg" role="group" aria-label="Diagram">
       ${Object.entries(FD_MODES).map(([k, m]) => `<button data-fd="${k}" aria-pressed="${fdMode === k}">${m.label}</button>`).join("")}
     </div>
@@ -1090,7 +1247,7 @@ function scatter(el, lanes, xKey, yKey, sx, sy) {
   }
   if (liveWindow) {
     el.insertAdjacentHTML("beforeend", `<div class="sub"><span class="live-dot live-key" style="background:var(--ink-muted)"></span>
-      Live: latest 5 minutes (${liveWindow}), updated every minute</div>`);
+      Live: latest 5 minutes (${liveWindow}), updated every ${COUNTRY === "nl" ? "5 minutes" : "minute"}</div>`);
   }
 
   canvas.addEventListener("mousemove", (ev) => {
@@ -1106,7 +1263,7 @@ function scatter(el, lanes, xKey, yKey, sx, sy) {
     const t = (s) => `${String(Math.floor(s / 12)).padStart(2, "0")}:${String((s % 12) * 5).padStart(2, "0")}`;
     showTip(ev, `<div>${WEEKDAYS[p.date.getUTCDay()]} ${fmtDate(p.date)} ${t(p.slot)}–${t(p.slot + 1)} · lane ${l.lane}</div>` +
       `<b>${fmtInt(p.q)}</b> veh/h · <b>${p.v.toFixed(0)}</b> km/h · <b>${p.k.toFixed(1)}</b> veh/km` +
-      `<div class="muted">${(p.heavy * 100).toFixed(0)}% heavy vehicles</div>`);
+      (p.heavy === null ? "" : `<div class="muted">${(p.heavy * 100).toFixed(0)}% heavy vehicles</div>`));
   });
   canvas.addEventListener("mouseleave", hideTip);
 }
@@ -1184,6 +1341,7 @@ function hideTip() { tip.style.display = "none"; }
 
 function fmtInt(v) { return isNaN(v) ? "–" : fmt.format(Math.round(v)); }
 function fmtDate(d) { return `${d.getUTCDate()}.${d.getUTCMonth() + 1}.${d.getUTCFullYear()}`; }
+function fmtDateTime(d) { return `${fmtDate(new Date(`${localDate(d)}T00:00Z`))} ${clock.format(d)}`; }
 function compact(v) { return v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : String(+v.toFixed(1)); }
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
