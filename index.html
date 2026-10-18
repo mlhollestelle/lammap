@@ -492,8 +492,8 @@ document.getElementById("themeToggle").setAttribute("aria-pressed", String(isDar
 
 function prettyName(name) { return name.replace(/_/g, " "); }
 // "Station 149 · Name" for LAM stations; Helsinki counters are named by the city, sometimes with a
-// sequence number in front ("4_Aleksanterinkatu").
-function displayName(st) { return st.kind === "hel" ? prettyName(st.name.replace(/^[\d.]+_/, "")) : prettyName(st.name); }
+// sequence number or feed name in front ("4_Aleksanterinkatu", "Formula : Lauttasaaren silta etelä").
+function displayName(st) { return st.kind === "hel" ? prettyName(st.name.replace(/^([\d.]+_|Formula : )/, "")) : prettyName(st.name); }
 function stationLabel(st) { return st.kind === "hel" ? `${displayName(st)} · Helsinki` : `${st.tms} · ${displayName(st)}`; }
 
 // Helsinki counters that stopped reporting more than this many days before the newest data are grey.

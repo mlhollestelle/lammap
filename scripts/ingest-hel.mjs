@@ -7,7 +7,7 @@
 //
 // Output:
 //   <out>/hel/<counter>.json   { id, all, d1, d2 }, each a map YYYYMMDD -> [h00..h23, total]
-//   <out>/hel/stations.json    [{ id, name, source, mode, lat, lon, dirs, last }], counters with data
+//   <out>/hel/stations.json    [{ id, name, source, mode, lat, lon, dirs, last, days }], counters with data
 //
 // The Fintraffic stations in the same API are left out: the map already shows them from Digitraffic.
 // So are the traffic light loops (LIVA), the per-lane radar loops (SmartJunction) and the sources
@@ -185,7 +185,6 @@ async function main() {
   console.log(`Fetching ${iso(START)} – ${iso(END)} for ${counters.length} Helsinki counters, keeping ${KEEP} days`);
 
   const list = [];
-  const seen = new Set(); // some devices are listed twice under different names, with the same data
   const failed = [];
   for (const c of counters) {
     try {
@@ -201,12 +200,9 @@ async function main() {
       for (const d of ["all", "d1", "d2"]) data[d] = merge(stored[d], maps[d]);
       const dayKeys = [...new Set(["all", "d1", "d2"].flatMap((d) => Object.keys(data[d])))].sort();
       if (!dayKeys.length || !mode) continue; // never reported in the kept window
-      const fingerprint = JSON.stringify([data.all, data.d1, data.d2]);
-      if (seen.has(fingerprint)) { console.log(`  ${c.id} ${c.name}: duplicate of another counter, skipped`); continue; }
-      seen.add(fingerprint);
       await writeFile(file, JSON.stringify(data));
       const dirs = dirNames.d1 && dirNames.d2 ? [dirNames.d1, dirNames.d2] : (prev?.dirs ?? null);
-      list.push({ id: c.id, name: c.name, source: c.source, mode, lat: c.lat, lon: c.lon, dirs, last: dayKeys.at(-1) });
+      list.push({ id: c.id, name: c.name, source: c.source, mode, lat: c.lat, lon: c.lon, dirs, last: dayKeys.at(-1), days: dayKeys.length });
     } catch (e) {
       failed.push(c.id);
       console.error(`Counter ${c.id} ${c.name}: ${e.message}`);
@@ -214,9 +210,19 @@ async function main() {
       if (previous.has(c.id)) list.push(previous.get(c.id));
     }
   }
-  await writeFile(listFile, JSON.stringify(list));
-  const byMode = list.reduce((a, s) => ({ ...a, [s.mode]: (a[s.mode] ?? 0) + 1 }), {});
-  console.log(`Done: ${list.length} counters with data (${Object.entries(byMode).map(([m, n]) => `${n} ${m}`).join(", ")}), ${failed.length} failed`);
+  // Some devices are listed twice, under another name with the same position (e.g. "Formula : ..."),
+  // with more or less the same data. Only the one with the most days goes on the map.
+  const best = new Map();
+  for (const s of list) {
+    const at = `${s.mode}:${s.lat.toFixed(5)},${s.lon.toFixed(5)}`;
+    if (!best.has(at) || s.days > best.get(at).days) best.set(at, s);
+  }
+  const kept = new Set(best.values());
+  for (const s of list) if (!kept.has(s)) console.log(`  ${s.id} ${s.name}: same place as a counter with more data, left off the map`);
+  const shown = list.filter((s) => kept.has(s));
+  await writeFile(listFile, JSON.stringify(shown));
+  const byMode = shown.reduce((a, s) => ({ ...a, [s.mode]: (a[s.mode] ?? 0) + 1 }), {});
+  console.log(`Done: ${shown.length} counters with data (${Object.entries(byMode).map(([m, n]) => `${n} ${m}`).join(", ")}), ${failed.length} failed`);
   if (failed.length > counters.length * 0.1) process.exit(1);
   if (failed.length) console.log(`::warning::${failed.length} Helsinki counters failed: ${failed.join(", ")}`);
 }
