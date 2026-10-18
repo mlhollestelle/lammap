@@ -1,6 +1,6 @@
 # lammap
 
-An interactive map of Finland's LAM traffic counting stations. Click or search for a station to see its traffic for the last 30 or 365 days. Data comes from [Fintraffic / Digitraffic](https://www.digitraffic.fi/) (CC BY 4.0).
+An interactive map of Finland's LAM traffic counting stations, plus the City of Helsinki's own car, bicycle and pedestrian counters. Click or search for a counter to see its traffic for the last 30 or 365 days. Data comes from [Fintraffic / Digitraffic](https://www.digitraffic.fi/) and the [City of Helsinki](https://lidotiku.api.hel.fi/api/) (both CC BY 4.0).
 
 The app is a single `index.html` with no build step.
 
@@ -22,5 +22,7 @@ It needs these repository settings:
 | `R2_BUCKET` | variable | bucket name |
 
 To try the script locally: `node scripts/ingest.mjs --days 30 --stations 101,102` (writes to `data/`).
+
+The Helsinki counters come from the city's [LIDO-TIKU API](https://lidotiku.api.hel.fi/swagger): its own LAM stations (`HEL LAM`, motor vehicles plus one bicycle station) and the Eco-Counter cycle and pedestrian counters. The same workflow runs `scripts/ingest-hel.mjs`, which stores hourly sums per counter in the same format under `hel/<counter>.json`, with the station list in `hel/stations.json`. The API's Fintraffic stations are left out, since the map already has them, as are the traffic light loops and the per-lane radar loops. Days cut short by an outage are dropped rather than shown as low traffic. To try it locally: `node scripts/ingest-hel.mjs --days 30` (all counters, a couple of minutes) or `--counters 4667,100008546`.
 
 The fundamental diagrams (flow, speed and density per lane, in 5-minute intervals) come from Digitraffic's raw per-vehicle files, aggregated by `scripts/ingest-fd.mjs` into one file per station per day (`fd/<date>/<tms>.json`, gzipped). To try it locally: `node scripts/ingest-fd.mjs --days 7 --stations 149,160`, copy those stations' files and `meta.json` from the bucket into `data/`, run `python3 -m http.server` in the repository and open `http://localhost:8000/?data=data#149`.

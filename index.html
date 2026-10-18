@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="strict-origin-when-cross-origin">
-<title>lammap · LAM traffic counters</title>
+<title>lammap · traffic counters</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -105,6 +105,8 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
     --dir-2: var(--moss);
     --missing: var(--line);
     --station: var(--moss);
+    --station-bike: var(--blue);
+    --station-walk: var(--marker);
     --station-off: var(--line-strong);
     --station-sel: var(--pink);
     --lane-1: var(--pink);
@@ -230,6 +232,15 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
     font: 500 12px/1 var(--font-mono); letter-spacing: 0.04em;
   }
   .lanes button:hover:not(:disabled) { transform: none; box-shadow: none; border-color: var(--ink); }
+  .modes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .modes button {
+    min-height: 26px; padding: 0 10px; border-radius: var(--radius-pill);
+    font: 500 12px/1 var(--font-mono); letter-spacing: 0.04em;
+  }
+  .modes button:hover:not(:disabled) { transform: none; box-shadow: none; border-color: var(--ink); }
+  .modes button i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
+  .modes button[aria-pressed="false"] { opacity: .5; border-style: dashed; }
+  .modes button[aria-pressed="false"] i { background: transparent !important; box-shadow: inset 0 0 0 1px var(--ink-muted); }
   .lanes-dir { align-self: center; font-weight: 600; margin-right: 4px; }
   .lanes button i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
   .lanes button[aria-pressed="false"] { opacity: .5; border-style: dashed; }
@@ -292,6 +303,7 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
     .head { margin: 0 -28px; padding: 14px 28px 12px; align-items: center; }
     .brand { flex: none; }
     .brand h1 { font-size: 30px; margin: 2px 0 0; }
+    .modes { margin-top: 6px; }
     .find { order: 0; flex: 1; position: relative; max-width: 360px; margin-left: auto; }
     #search { margin: 0; }
     #results {
@@ -353,12 +365,13 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
 <aside id="panel">
   <header class="head">
     <div class="brand">
-      <div class="label">LAM traffic counters · Finland</div>
+      <div class="label">Traffic counters · Finland</div>
       <h1>lammap</h1>
       <div class="sub" id="stationCount">Loading stations…</div>
+      <div class="modes" id="modes" role="group" aria-label="Show on map"></div>
     </div>
     <div class="find">
-      <input id="search" type="search" placeholder="Search station by name or number" autocomplete="off" aria-label="Search stations">
+      <input id="search" type="search" placeholder="Search counter by name or number" autocomplete="off" aria-label="Search stations">
       <ul id="results"></ul>
     </div>
     <div class="links">
@@ -374,7 +387,7 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
       </a>
     </div>
   </header>
-  <div id="detail"><p class="muted">Click a station on the map to see its traffic for the last 30 or 365 days.</p></div>
+  <div id="detail"><p class="muted">Click a counter on the map to see its traffic for the last 30 or 365 days: Fintraffic's LAM stations across Finland, and the City of Helsinki's own car, bicycle and pedestrian counters.</p></div>
 </aside>
 <div id="tip"></div>
 
@@ -383,6 +396,14 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
 "use strict";
 
 const API = "https://tie.digitraffic.fi/api/tms/v1";
+// The City of Helsinki's own counters (scripts/ingest-hel.mjs); its API is linked for CSV downloads.
+const HEL_API = "https://lidotiku.api.hel.fi/api";
+// What a station counts. Digitraffic's LAM stations count motor vehicles.
+const MODES = {
+  car: { label: "Motor vehicles", unit: "vehicles", noun: "traffic counter", color: "--station" },
+  bike: { label: "Cyclists", unit: "cyclists", noun: "cycle counter", color: "--station-bike" },
+  pedestrian: { label: "Pedestrians", unit: "pedestrians", noun: "pedestrian counter", color: "--station-walk" },
+};
 // Public URL of the R2 bucket filled by .github/workflows/ingest.yml. "?data=<url>" points the
 // page at another copy, e.g. data/ from the ingest scripts: run `python3 -m http.server` in the
 // repository and open http://localhost:8000/?data=data
@@ -434,7 +455,7 @@ const map = L.map("map", { preferCanvas: true }).setView([64.5, 26], 5);
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 18,
   referrerPolicy: "strict-origin-when-cross-origin",
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Data: Fintraffic / <a href="https://www.digitraffic.fi/">Digitraffic</a>, CC BY 4.0',
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Data: Fintraffic / <a href="https://www.digitraffic.fi/">Digitraffic</a>, <a href="https://lidotiku.api.hel.fi/api/">City of Helsinki</a>, CC BY 4.0',
 }).addTo(map);
 
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
@@ -442,12 +463,11 @@ let stations = [];
 let selectedMarker = null;
 
 function markerStyle(st, selected) {
-  const removed = st.collectionStatus !== "GATHERING";
   return {
     radius: selected ? 8 : 5,
     weight: selected ? 2 : 1,
     color: css("--surface"),
-    fillColor: selected ? css("--station-sel") : removed ? css("--station-off") : css("--station"),
+    fillColor: selected ? css("--station-sel") : st.inactive ? css("--station-off") : css(MODES[st.mode].color),
     fillOpacity: 0.95,
   };
 }
@@ -471,32 +491,88 @@ darkQuery.addEventListener("change", themeChanged);
 document.getElementById("themeToggle").setAttribute("aria-pressed", String(isDark()));
 
 function prettyName(name) { return name.replace(/_/g, " "); }
+// "Station 149 · Name" for LAM stations; Helsinki counters are named by the city, sometimes with a
+// sequence number in front ("4_Aleksanterinkatu").
+function displayName(st) { return st.kind === "hel" ? prettyName(st.name.replace(/^[\d.]+_/, "")) : prettyName(st.name); }
+function stationLabel(st) { return st.kind === "hel" ? `${displayName(st)} · Helsinki` : `${st.tms} · ${displayName(st)}`; }
+
+// Helsinki counters that stopped reporting more than this many days before the newest data are grey.
+const HEL_STALE_DAYS = 7;
+
+async function loadHelStations() {
+  try {
+    const res = await fetch(`${DATA}/hel/stations.json`);
+    if (!res.ok) return [];
+    return (await res.json()).map((s) => ({
+      kind: "hel",
+      key: `hel-${s.id}`,
+      id: s.id,
+      name: s.name,
+      source: s.source,
+      mode: s.mode,
+      dirs: s.dirs,
+      last: s.last,
+      lat: s.lat,
+      lon: s.lon,
+    }));
+  } catch (e) { return []; } // the LAM stations still work without them
+}
+
+const shownModes = new Set(Object.keys(MODES));
+
+function renderModes() {
+  const el = document.getElementById("modes");
+  el.innerHTML = Object.entries(MODES).map(([k, m]) => {
+    const n = stations.filter((s) => s.mode === k).length;
+    return n ? `<button data-mode="${k}" aria-pressed="${shownModes.has(k)}"><i style="background:var(${m.color})"></i>${m.label} ${n}</button>` : "";
+  }).join("");
+  el.querySelectorAll("[data-mode]").forEach((b) => {
+    b.onclick = () => {
+      const k = b.dataset.mode;
+      if (shownModes.has(k)) shownModes.delete(k); else shownModes.add(k);
+      for (const st of stations) {
+        if (st.mode !== k) continue;
+        // The selected station stays on the map.
+        if (shownModes.has(k) || st.marker === selectedMarker) st.marker.addTo(map); else st.marker.remove();
+      }
+      renderModes();
+    };
+  });
+}
 
 async function loadStations() {
   try {
-    const [res] = await Promise.all([fetch(`${API}/stations`, { headers: { "Digitraffic-User": "lammap" } }), loadMeta()]);
+    const [res, hel] = await Promise.all([fetch(`${API}/stations`, { headers: { "Digitraffic-User": "lammap" } }), loadHelStations(), loadMeta()]);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const gj = await res.json();
-    stations = gj.features.map((f) => ({
+    const lam = gj.features.map((f) => ({
+      kind: "lam",
+      key: String(f.properties.tmsNumber),
       id: f.id,
       tms: f.properties.tmsNumber, // the history API is keyed by tmsNumber, NOT by feature id
       name: f.properties.name,
-      collectionStatus: f.properties.collectionStatus,
+      mode: "car",
+      inactive: f.properties.collectionStatus !== "GATHERING",
       lat: f.geometry.coordinates[1],
       lon: f.geometry.coordinates[0],
     }));
+    const stale = key(addDays(END, -HEL_STALE_DAYS));
+    for (const st of hel) st.inactive = st.last < stale;
+    stations = [...lam, ...hel];
     for (const st of stations) {
       st.marker = L.circleMarker([st.lat, st.lon], markerStyle(st, false))
-        .bindTooltip(`${st.tms} · ${prettyName(st.name)}`)
+        .bindTooltip(escapeHtml(stationLabel(st)))
         .on("click", () => selectStation(st))
         .addTo(map);
     }
-    const active = stations.filter((s) => s.collectionStatus === "GATHERING").length;
+    const active = lam.filter((s) => !s.inactive).length;
     document.getElementById("stationCount").textContent =
-      `${stations.length} stations (${active} active, ${stations.length - active} temporarily removed, grey)`;
-    const fromHash = Number(location.hash.slice(1));
-    const initial = stations.find((s) => s.tms === fromHash);
-    if (initial) { selectStation(initial); map.setView([initial.lat, initial.lon], 10); }
+      `${lam.length} LAM stations (${active} active, ${lam.length - active} temporarily removed, grey)` +
+      (hel.length ? ` and ${hel.length} City of Helsinki counters` : "");
+    renderModes();
+    const fromHash = decodeURIComponent(location.hash.slice(1));
+    const initial = stations.find((s) => s.key === fromHash);
+    if (initial) { selectStation(initial); map.setView([initial.lat, initial.lon], initial.kind === "hel" ? 13 : 10); }
   } catch (e) {
     document.getElementById("stationCount").innerHTML =
       `<span class="error">Could not load stations (${e.message}).</span> <button onclick="location.reload()">Retry</button>`;
@@ -511,13 +587,13 @@ searchEl.addEventListener("input", () => {
   resultsEl.innerHTML = "";
   if (!q) return;
   const hits = stations
-    .filter((s) => String(s.tms) === q || prettyName(s.name).toLowerCase().includes(q))
+    .filter((s) => String(s.tms ?? s.id) === q || displayName(s).toLowerCase().includes(q) || s.name.toLowerCase().includes(q))
     .slice(0, 30);
   for (const s of hits) {
     const li = document.createElement("li");
-    li.textContent = `${s.tms} · ${prettyName(s.name)}`;
+    li.textContent = stationLabel(s);
     li.onclick = () => {
-      map.setView([s.lat, s.lon], 11);
+      map.setView([s.lat, s.lon], s.kind === "hel" ? 13 : 11);
       selectStation(s);
       searchEl.value = "";
       resultsEl.innerHTML = "";
@@ -530,8 +606,23 @@ searchEl.addEventListener("input", () => {
 // ---------- data ----------
 const cache = new Map();
 
-// Link to the original Digitraffic CSV for the selected window.
-function historyUrl(tms) {
+// Link to the original CSV for the selected window: Digitraffic's report, or the hourly (daily for
+// long windows, which would pass the API's page limit) sums from the City of Helsinki's API.
+function historyUrl(st) {
+  if (st.kind === "hel") {
+    const p = new URLSearchParams({
+      counter: String(st.id),
+      period: days > 31 ? "day" : "hour",
+      measurement_type: "count",
+      start_date: iso(windowDates()[0]),
+      end_date: iso(END),
+      order: "start_time",
+      page_size: "10000",
+      format: "csv",
+    });
+    return `${HEL_API}/observations/aggregate/?${p}`;
+  }
+  const tms = st.tms;
   const p = new URLSearchParams({
     api: "liikennemaara", // corrected traffic volumes
     tyyppi: "h",          // hourly report
@@ -569,6 +660,7 @@ function toReport(json) {
 // Direction names ("towards Helsinki") from the station metadata. Best effort.
 const dirNameCache = new Map();
 async function fetchDirectionNames(st) {
+  if (st.kind === "hel") return st.dirs ?? ["Direction 1", "Direction 2"];
   if (dirNameCache.has(st.id)) return dirNameCache.get(st.id);
   let names = ["Direction 1", "Direction 2"];
   try {
@@ -583,12 +675,12 @@ async function fetchDirectionNames(st) {
   return names;
 }
 
-async function fetchReport(tms) {
-  if (cache.has(tms)) return cache.get(tms);
-  const res = await fetch(`${DATA}/stations/${tms}.json`);
+async function fetchReport(st) {
+  if (cache.has(st.key)) return cache.get(st.key);
+  const res = await fetch(st.kind === "hel" ? `${DATA}/hel/${st.id}.json` : `${DATA}/stations/${st.tms}.json`);
   if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
   const report = toReport(res.ok ? await res.json() : {}); // 404: station not ingested yet
-  cache.set(tms, report);
+  cache.set(st.key, report);
   return report;
 }
 
@@ -619,25 +711,33 @@ function analyse(days, dates) {
 let requestSeq = 0;
 
 function headHtml(st) {
+  const what = st.kind === "hel"
+    ? `City of Helsinki ${MODES[st.mode].noun} · ${escapeHtml(st.source)}` +
+      (st.inactive ? ` · no data since ${fmtDate(fromKey(st.last))}` : "")
+    : `Station ${st.tms}${st.inactive ? " · temporarily removed" : ""}`;
   return `
-    <h2>${escapeHtml(prettyName(st.name))}</h2>
-    <div class="sub">Station ${st.tms}${st.collectionStatus !== "GATHERING" ? " · temporarily removed" : ""}
-      · ${fmtDate(windowDates()[0])} – ${fmtDate(END)}</div>`;
+    <h2>${escapeHtml(displayName(st))}</h2>
+    <div class="sub">${what} · ${fmtDate(windowDates()[0])} – ${fmtDate(END)}</div>`;
 }
 
 async function selectStation(st) {
-  if (selectedMarker) selectedMarker.setStyle(markerStyle(selectedMarker.station, false));
+  if (selectedMarker) {
+    const prev = selectedMarker.station;
+    selectedMarker.setStyle(markerStyle(prev, false));
+    if (!shownModes.has(prev.mode) && prev !== st) selectedMarker.remove();
+  }
   st.marker.station = st;
+  if (!st.marker._map) st.marker.addTo(map); // found by search or link while its mode was hidden
   st.marker.setStyle(markerStyle(st, true)).bringToFront();
   selectedMarker = st.marker;
-  history.replaceState(null, "", `#${st.tms}`);
+  history.replaceState(null, "", `#${st.key}`);
 
   const seq = ++requestSeq;
   const detail = document.getElementById("detail");
   detail.innerHTML = headHtml(st) + '<p class="muted">Loading traffic data…</p>';
 
   try {
-    const [report, dirNames] = await Promise.all([fetchReport(st.tms), fetchDirectionNames(st)]);
+    const [report, dirNames] = await Promise.all([fetchReport(st), fetchDirectionNames(st)]);
     if (seq !== requestSeq) return; // a newer click won
     if (!report.hasDirections) selectedDir = "all";
     renderDetail(st, report, dirNames);
@@ -679,7 +779,11 @@ function renderDetail(st, report, dirNames) {
   }
 
   const a = view[selectedDir];
+  const unit = MODES[st.mode].unit;
+  const Unit = unit.replace(/^\w/, (c) => c.toUpperCase());
   const dirLabel = selectedDir === "all" ? "both directions" : dirNames[selectedDir === "d1" ? 0 : 1].replace(/^\w/, (c) => c.toLowerCase());
+  // Eco-Counter devices and the city's bicycle loop never split by direction, so they get no direction buttons.
+  const noDirections = st.kind === "hel" && !st.dirs;
   const btn = (k, label) =>
     `<button data-dir="${k}" aria-pressed="${selectedDir === k}" ${hasDirections || k === "all" ? "" : "disabled"}>${escapeHtml(label)}</button>`;
   let split = "";
@@ -707,25 +811,25 @@ function renderDetail(st, report, dirNames) {
       <div>${headHtml(st)}</div>
       <div class="controls">
         ${rangeSeg}
-        <div class="seg" role="group" aria-label="Direction">
+        ${noDirections ? "" : `<div class="seg" role="group" aria-label="Direction">
           ${btn("all", "Both directions")}${btn("d1", dirNames[0])}${btn("d2", dirNames[1])}
-        </div>
+        </div>`}
       </div>
     </div>
-    ${hasDirections ? "" : '<div class="sub" style="margin-top:4px">This report has no per-direction breakdown for this station.</div>'}
+    ${hasDirections || noDirections ? "" : '<div class="sub" style="margin-top:4px">This report has no per-direction breakdown for this station.</div>'}
     <div class="tiles">
-      <div class="tile"><div class="v">${fmtInt(a.adt)}</div><div class="l">Avg. daily traffic</div></div>
+      <div class="tile"><div class="v">${fmtInt(a.adt)}</div><div class="l">${st.mode === "car" ? "Avg. daily traffic" : `Avg. daily ${unit}`}</div></div>
       <div class="tile"><div class="v">${fmtInt(a.adtWeekday)}</div><div class="l">Weekday avg. (Mon–Fri)</div></div>
       <div class="tile"><div class="v">${fmtInt(a.adtWeekend)}</div><div class="l">Weekend avg. (Sat–Sun)</div></div>
       ${split}
     </div>
-    <div class="sub" style="margin-top:6px">Vehicles per day, ${escapeHtml(dirLabel)}, all vehicle classes.
+    <div class="sub" style="margin-top:6px">${Unit} per day${noDirections ? "" : `, ${escapeHtml(dirLabel)}`}${st.mode === "car" ? ", all vehicle classes" : ""}.
       Based on ${a.nDays} of ${days} days with data.</div>
 
     <div class="dash">
     <div class="col">
     <h3>Average hourly distribution</h3>
-    <div class="sub">Average vehicles per hour of day (Finnish time)</div>
+    <div class="sub">Average ${unit} per hour of day (Finnish time)</div>
     ${stacked ? `<div class="legend">
       <span><i style="background:var(--dir-1)"></i>${escapeHtml(dirNames[0])}</span>
       <span><i style="background:var(--dir-2)"></i>${escapeHtml(dirNames[1])}</span>
@@ -733,7 +837,7 @@ function renderDetail(st, report, dirNames) {
     <div class="chart" id="hourChart"></div>
 
     ${weekly ? `<h3>Weekly traffic, last ${days} days</h3>
-    <div class="sub">Average vehicles per day in each week (Mon–Sun)</div>` : `<h3>Daily traffic, last ${days} days</h3>`}
+    <div class="sub">Average ${unit} per day in each week (Mon–Sun)</div>` : `<h3>Daily traffic, last ${days} days</h3>`}
     <div class="legend">
       ${weekly ? "" : `<span><i style="background:var(--series-1)"></i>Weekday</span>
       <span><i style="background:var(--series-2)"></i>Weekend</span>`}
@@ -741,12 +845,14 @@ function renderDetail(st, report, dirNames) {
     </div>
     <div class="chart" id="dayChart"></div>
     </div>
-    <div class="col" id="fd"><h3>Fundamental diagram</h3><p class="muted">Loading lane data…</p></div>
+    ${st.kind === "lam" ? '<div class="col" id="fd"><h3>Fundamental diagram</h3><p class="muted">Loading lane data…</p></div>' : ""}
     </div>
 
     <div class="foot">
-      Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes), updated daily${updated ? `, last on ${fmtDate(updated)}` : ""}.
-      <a href="${historyUrl(st.tms)}">Download CSV</a>
+      ${st.kind === "hel"
+        ? `Source: City of Helsinki, <a href="${HEL_API}/">LIDO-TIKU API</a> (${escapeHtml(st.source)}), CC BY 4.0. Hourly sums, uncorrected; days cut short by an outage are left out. Updated daily${updated ? `, last on ${fmtDate(updated)}` : ""}.`
+        : `Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes), updated daily${updated ? `, last on ${fmtDate(updated)}` : ""}.`}
+      <a href="${historyUrl(st)}">Download CSV</a>
     </div>`;
   detail.querySelectorAll("[data-dir]").forEach((b) => {
     b.onclick = () => {
@@ -755,8 +861,9 @@ function renderDetail(st, report, dirNames) {
     };
   });
   wireRange();
-  drawCharts({ a, view, dirNames, stacked, weekly });
-  showFd(st, dirNames);
+  drawCharts({ a, view, dirNames, stacked, weekly, unit });
+  if (st.kind === "lam") showFd(st, dirNames);
+  else { stopLive(); fdState = null; }
 }
 
 // Splits days into Monday-to-Sunday weeks; the first and last week may be partial.
@@ -772,7 +879,7 @@ function weeks(daily) {
 let current = null;
 function drawCharts(state) {
   current = state;
-  const { a, view, dirNames, stacked, weekly } = state;
+  const { a, view, dirNames, stacked, weekly, unit } = state;
   const hourEl = document.getElementById("hourChart");
   const dayEl = document.getElementById("dayChart");
   if (!hourEl || !dayEl) return;
@@ -784,13 +891,13 @@ function drawCharts(state) {
       showLabel: h % 3 === 0,
       value: v,
       color: dirColor,
-      tip: `<div>${range}</div><b>${fmtInt(v)}</b> vehicles/h · ${a.hourlyShare[h].toFixed(1)}% of day`,
+      tip: `<div>${range}</div><b>${fmtInt(v)}</b> ${unit}/h · ${a.hourlyShare[h].toFixed(1)}% of day`,
     };
     if (stacked) {
       const v1 = view.d1.hourly[h], v2 = view.d2.hourly[h];
       bar.segments = [{ value: v1 || 0, color: "var(--dir-1)" }, { value: v2 || 0, color: "var(--dir-2)" }];
       bar.value = (v1 || 0) + (v2 || 0);
-      bar.tip = `<div>${range}</div><b>${fmtInt(bar.value)}</b> vehicles/h` +
+      bar.tip = `<div>${range}</div><b>${fmtInt(bar.value)}</b> ${unit}/h` +
         `<div>${escapeHtml(dirNames[0])}: <b>${fmtInt(v1)}</b></div>` +
         `<div>${escapeHtml(dirNames[1])}: <b>${fmtInt(v2)}</b></div>`;
     }
@@ -807,7 +914,7 @@ function drawCharts(state) {
         value: v,
         color: dirColor,
         tip: `<div>${fmtDate(w[0].date)} – ${fmtDate(w[w.length - 1].date)}</div>` +
-          (v === null ? '<span class="muted">No data</span>' : `<b>${fmtInt(v)}</b> vehicles/day`) +
+          (v === null ? '<span class="muted">No data</span>' : `<b>${fmtInt(v)}</b> ${unit}/day`) +
           (present.length && present.length < w.length ? ` <span class="muted">(${present.length} of ${w.length} days)</span>` : ""),
       };
     }));
@@ -821,7 +928,7 @@ function drawCharts(state) {
       value: d.total,
       color: weekend ? "var(--series-2)" : "var(--series-1)",
       tip: `<div>${WEEKDAYS[d.dow]} ${fmtDate(d.date)}</div>` +
-        (d.total === null ? '<span class="muted">No data</span>' : `<b>${fmt.format(d.total)}</b> vehicles`),
+        (d.total === null ? '<span class="muted">No data</span>' : `<b>${fmt.format(d.total)}</b> ${unit}`),
     };
   }));
 }
