@@ -49,12 +49,20 @@ jobs:
           node-version: 24
 
       - name: Download current data from R2
-        run: aws s3 sync "$BUCKET/stations" data/stations --endpoint-url "$ENDPOINT" --only-show-errors
+        run: |
+          aws s3 sync "$BUCKET/stations" data/stations --endpoint-url "$ENDPOINT" --only-show-errors
+          aws s3 sync "$BUCKET/hel" data/hel --endpoint-url "$ENDPOINT" --only-show-errors
 
       - name: Fetch new days from Digitraffic
         run: |
           [[ "$DAYS" =~ ^[0-9]+$ ]] || { echo "days must be a number"; exit 1; }
           node scripts/ingest.mjs --days "$DAYS" $SKIP_EXISTING
+
+      # The City of Helsinki's own car, bicycle and pedestrian counters. Also after a failed
+      # Digitraffic fetch, since the two sources are independent.
+      - name: Fetch Helsinki counters
+        if: ${{ !cancelled() }}
+        run: node scripts/ingest-hel.mjs --days "$DAYS"
 
       # Also after a failed fetch, so stations that did succeed are kept.
       - name: Upload to R2
