@@ -35,6 +35,8 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
     --marker: #f2c230;
     --blue: #2d5bd0;
     --danger: #b42318;
+    --disruption: #d1281b;
+    --roadwork: #e06a00;
     --shadow-pop: 4px 4px 0 #16201b;
     --shadow-soft: 0 1px 2px rgba(22, 32, 27, 0.06), 0 8px 24px rgba(22, 32, 27, 0.06);
     --tile-filter: grayscale(1) contrast(0.95) brightness(1.03);
@@ -60,6 +62,8 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
       --marker: #e8b923;
       --blue: #86a8ff;
       --danger: #ff8a80;
+      --disruption: #ff6b5b;
+      --roadwork: #ff9a3c;
       --shadow-pop: 4px 4px 0 #ff7faa;
       --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
       --tile-filter: grayscale(1) invert(1) contrast(0.85) brightness(0.9);
@@ -85,6 +89,8 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
     --marker: #e8b923;
     --blue: #86a8ff;
     --danger: #ff8a80;
+    --disruption: #ff6b5b;
+    --roadwork: #ff9a3c;
     --shadow-pop: 4px 4px 0 #ff7faa;
     --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
     --tile-filter: grayscale(1) invert(1) contrast(0.85) brightness(0.9);
@@ -241,6 +247,7 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
   .modes button i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
   .modes button[aria-pressed="false"] { opacity: .5; border-style: dashed; }
   .modes button[aria-pressed="false"] i { background: transparent !important; box-shadow: inset 0 0 0 1px var(--ink-muted); }
+  .modes button i.line { width: 12px; height: 4px; border-radius: 2px; vertical-align: 1px; }
   .lanes-dir { align-self: center; font-weight: 600; margin-right: 4px; }
   .lanes button i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
   .lanes button[aria-pressed="false"] { opacity: .5; border-style: dashed; }
@@ -295,6 +302,15 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
   .leaflet-tooltip-bottom:before { border-bottom-color: var(--surface-raised); }
   .leaflet-tooltip-left:before { border-left-color: var(--surface-raised); }
   .leaflet-tooltip-right:before { border-right-color: var(--surface-raised); }
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--surface-raised); color: var(--ink); box-shadow: var(--shadow-soft); }
+  .leaflet-popup-content-wrapper { border: 1px solid var(--line); border-radius: var(--radius-md); }
+  .leaflet-popup-content { margin: 14px 18px 14px 16px; font: 13px/1.45 var(--font-sans); }
+  .leaflet-container a.leaflet-popup-close-button { color: var(--ink-muted); }
+  .ev h4 { margin: 6px 0 2px; font: 700 16px/1.3 var(--font-display); letter-spacing: -0.01em; }
+  .ev .when { color: var(--ink-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .ev ul { margin: 8px 0 0; padding-left: 18px; }
+  .ev p { margin: 8px 0 0; }
+  .ev .foot { margin-top: 10px; padding-top: 8px; }
 
   /* Large screens: a dashboard that fits the window, so every chart is in view without scrolling */
   @media (min-width: 1100px) and (min-height: 600px) {
@@ -369,6 +385,7 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
       <h1>lammap</h1>
       <div class="sub" id="stationCount">Loading stations…</div>
       <div class="modes" id="modes" role="group" aria-label="Show on map"></div>
+      <div class="modes" id="events" role="group" aria-label="Traffic messages on map"></div>
     </div>
     <div class="find">
       <input id="search" type="search" placeholder="Search counter by name or number" autocomplete="off" aria-label="Search stations">
@@ -480,6 +497,7 @@ function themeChanged() {
   document.getElementById("themeToggle").setAttribute("aria-pressed", String(isDark()));
   for (const st of stations) st.marker?.setStyle(markerStyle(st, st.marker === selectedMarker));
   if (fdState?.dirs) drawFd();
+  for (const ev of Object.values(EVENTS)) ev.layer?.eachLayer((l) => l.setStyle(eventStyle(ev, l)));
 }
 document.getElementById("themeToggle").addEventListener("click", () => {
   const theme = isDark() ? "light" : "dark";
@@ -577,6 +595,163 @@ async function loadStations() {
     document.getElementById("stationCount").innerHTML =
       `<span class="error">Could not load stations (${e.message}).</span> <button onclick="location.reload()">Retry</button>`;
   }
+}
+
+// ---------- disruptions and roadworks ----------
+// Digitraffic's traffic messages that are valid right now, drawn under the counters. The roadworks
+// are about 1 MB, so they load only when switched on; both refresh while they are shown.
+const TM_API = "https://tie.digitraffic.fi/api/traffic-message/v2";
+const EVENTS = {
+  disruption: { label: "Disruptions", path: "traffic-announcements", color: "--disruption", on: true },
+  roadwork: { label: "Roadworks", path: "roadworks", color: "--roadwork", on: false },
+};
+const EVENTS_REFRESH_MS = 5 * 60_000;
+const ANNOUNCEMENT_TYPES = {
+  general: "Traffic announcement",
+  "accident report": "Accident",
+  "preliminary accident report": "Accident, preliminary",
+  "unconfirmed observation": "Unconfirmed observation",
+  "ended": "Ended",
+  "retracted": "Retracted",
+};
+// The messages are in Finnish; the common restrictions get an English name, the rest stay as sent.
+const FEATURES_EN = {
+  "Nopeusrajoitus": "Speed limit",
+  "Ajokaista suljettu liikenteeltä": "Lane closed",
+  "Ajokaistoja suljettu liikenteeltä": "Lanes closed",
+  "Ajokaistoja on kavennettu": "Narrowed lanes",
+  "Toinen ajorata on suljettu liikenteeltä": "One carriageway closed",
+  "Tie on suljettu liikenteeltä": "Road closed",
+  "Liikenne pysäytetään ajoittain": "Traffic stopped at times",
+  "Liikenne ohjataan vuorotellen tapahtumapaikan ohi": "Alternating one-way traffic",
+  "Liikenne ohjataan kaksisuuntaisena toiselle ajoradalle": "Two-way traffic on one carriageway",
+  "Paikalla tilapäinen liikennevalo-ohjaus": "Temporary traffic lights",
+  "Tapahtumapaikalla on käytössä kiertotie": "Detour in use",
+  "Paikalla on kiertotieopastus": "Detour signposted",
+  "Kiertotien kuvaus": "Detour",
+  "Ajoneuvon suurin sallittu leveys": "Max vehicle width",
+  "Ajoneuvon suurin sallittu korkeus": "Max vehicle height",
+  "Ajoneuvon suurin sallittu pituus": "Max vehicle length",
+  "Ajoneuvon suurin sallittu massa": "Max vehicle weight",
+  "Liikennejärjestelyt ovat muuttuneet": "Changed traffic arrangements",
+  "Lautan kantavuus on muuttunut": "Ferry load limit changed",
+  "Onnettomuus": "Accident",
+  "Liikenne ruuhkautuu": "Congestion",
+  "Liikenne saattaa ruuhkautua": "Congestion possible",
+  "Liikenne on jonoutunut": "Queues",
+};
+
+// Lines get the message colour; points are dots with a ring, so they read apart from the counters.
+function eventStyle(ev, layer) {
+  const point = layer instanceof L.CircleMarker;
+  return {
+    color: point ? css("--surface") : css(ev.color),
+    weight: point ? 2 : 4,
+    opacity: 0.85,
+    fillColor: css(ev.color),
+    fillOpacity: 0.95,
+    radius: 6,
+  };
+}
+
+function renderEvents() {
+  const el = document.getElementById("events");
+  el.innerHTML = Object.entries(EVENTS).map(([k, ev]) => {
+    const n = ev.error ? "–" : ev.layer ? ev.layer.getLayers().length : ev.on ? "…" : "";
+    const title = ev.error ? ` title="Could not load (${escapeHtml(ev.error)})"` : "";
+    return `<button data-event="${k}" aria-pressed="${ev.on}"${title}><i class="line" style="background:var(${ev.color})"></i>${ev.label} ${n}</button>`;
+  }).join("");
+  el.querySelectorAll("[data-event]").forEach((b) => {
+    b.onclick = () => {
+      const ev = EVENTS[b.dataset.event];
+      ev.on = !ev.on;
+      if (!ev.on) ev.layer?.remove();
+      else if (!ev.layer || Date.now() - ev.loaded > EVENTS_REFRESH_MS) loadEvents(b.dataset.event);
+      if (ev.on && ev.layer) showEvents(ev);
+      renderEvents();
+    };
+  });
+}
+
+function showEvents(ev) {
+  ev.layer.addTo(map);
+  // Under the counters, so a counter on a road with roadworks can still be clicked.
+  ev.layer.eachLayer((l) => l.bringToBack());
+}
+
+async function loadEvents(k) {
+  const ev = EVENTS[k];
+  const now = encodeURIComponent(new Date().toISOString());
+  try {
+    const res = await fetch(`${TM_API}/${ev.path}?from=${now}&to=${now}`, { headers: { "Digitraffic-User": "lammap" } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const features = (await res.json()).features.filter((f) => f.geometry && f.properties.announcements?.length);
+    ev.layer?.remove();
+    ev.layer = L.geoJSON(features, {
+      pointToLayer: (f, latlng) => L.circleMarker(latlng),
+      onEachFeature: (f, layer) => {
+        layer.setStyle(eventStyle(ev, layer));
+        layer.bindTooltip(escapeHtml(eventHeading(f.properties)), { sticky: true });
+        layer.bindPopup(() => eventPopup(ev, f.properties), { maxWidth: 320 });
+      },
+    });
+    ev.loaded = Date.now();
+    ev.error = null;
+    if (ev.on) showEvents(ev);
+  } catch (e) {
+    ev.error = e.message;
+  }
+  renderEvents();
+}
+
+setInterval(() => {
+  if (document.hidden) return;
+  for (const [k, ev] of Object.entries(EVENTS)) if (ev.on) loadEvents(k);
+}, EVENTS_REFRESH_MS);
+
+// "Aitoniemen tie, road 14193 · Tampere", from the road address, or the start of the Finnish title.
+function eventHeading(p) {
+  const a = p.announcements[0];
+  const pt = a.locationDetails?.roadAddressLocation?.primaryPoint;
+  const road = pt?.roadAddress?.road;
+  const name = [pt?.roadName, road && (pt.roadName ? `road ${road}` : `Road ${road}`)].filter(Boolean).join(", ");
+  return name ? [name, pt.municipality].filter(Boolean).join(" · ") : a.title.split(". ")[0];
+}
+
+const timeFmt = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Helsinki", year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+});
+function fmtTime(s) {
+  const p = Object.fromEntries(timeFmt.formatToParts(new Date(s)).map((x) => [x.type, x.value]));
+  const year = p.year === String(helsinkiToday().getUTCFullYear()) ? "" : p.year;
+  return `${+p.day}.${+p.month}.${year} ${p.hour}:${p.minute}`;
+}
+function eventWhen(t) {
+  if (!t?.startTime) return "";
+  return t.endTime ? `${fmtTime(t.startTime)} – ${fmtTime(t.endTime)}` : `Since ${fmtTime(t.startTime)}`;
+}
+
+function featureText(f) {
+  const name = FEATURES_EN[f.name] ?? f.name;
+  if (f.quantity != null) return `${name} ${fmt.format(f.quantity)} ${f.unit ?? ""}`.trim();
+  return f.description ? `${name}: ${f.description}` : name;
+}
+
+function eventPopup(ev, p) {
+  const a = p.announcements[0];
+  const type = p.situationType === "road work" ? "Roadwork" : ANNOUNCEMENT_TYPES[p.trafficAnnouncementType] ?? "Traffic announcement";
+  const features = [...new Set(a.features.map(featureText))];
+  const works = [...new Set(a.roadWorkPhases.flatMap((ph) => ph.workTypes ?? []).map((w) => w.type).filter((t) => t && t !== "other"))];
+  const where = escapeHtml(a.location?.description ?? "").replace(/\n/g, "<br>");
+  return `<div class="ev">
+    <div class="label" style="color:var(${ev.color})">${type}</div>
+    <h4>${escapeHtml(eventHeading(p))}</h4>
+    <div class="when">${escapeHtml(eventWhen(a.timeAndDuration))}</div>
+    ${features.length ? `<ul>${features.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>` : ""}
+    ${works.length ? `<p>Work: ${escapeHtml(works.join(", "))}</p>` : ""}
+    ${where ? `<p class="muted" lang="fi">${where}</p>` : ""}
+    <div class="foot">${escapeHtml(a.sender ?? "Fintraffic")} · <a href="https://liikennetilanne.fintraffic.fi/" target="_blank" rel="noopener">Fintraffic traffic situation</a></div>
+  </div>`;
 }
 
 // ---------- search ----------
@@ -1295,6 +1470,8 @@ function compact(v) { return v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : String(+
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
 loadStations();
+renderEvents();
+for (const k of Object.keys(EVENTS)) if (EVENTS[k].on) loadEvents(k);
 </script>
 </body>
 </html>
