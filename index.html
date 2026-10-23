@@ -248,6 +248,8 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
   .modes button[aria-pressed="false"] { opacity: .5; border-style: dashed; }
   .modes button[aria-pressed="false"] i { background: transparent !important; box-shadow: inset 0 0 0 1px var(--ink-muted); }
   .modes button i.line { width: 12px; height: 4px; border-radius: 2px; vertical-align: 1px; }
+  .modes button i.triangle { width: 10px; height: 9px; border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+  .modes button[aria-pressed="false"] i.triangle { background: var(--ink-muted) !important; box-shadow: none; }
   .lanes-dir { align-self: center; font-weight: 600; margin-right: 4px; }
   .lanes button i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
   .lanes button[aria-pressed="false"] { opacity: .5; border-style: dashed; }
@@ -583,6 +585,7 @@ async function loadStations() {
         .on("click", () => selectStation(st))
         .addTo(map);
     }
+    for (const ev of Object.values(EVENTS)) if (ev.on && ev.layer) showEvents(ev);
     const active = lam.filter((s) => !s.inactive).length;
     document.getElementById("stationCount").textContent =
       `${lam.length} LAM stations (${active} active, ${lam.length - active} temporarily removed, grey)` +
@@ -602,8 +605,8 @@ async function loadStations() {
 // are about 1 MB, so they load only when switched on; both refresh while they are shown.
 const TM_API = "https://tie.digitraffic.fi/api/traffic-message/v2";
 const EVENTS = {
-  disruption: { label: "Disruptions", path: "traffic-announcements", color: "--disruption", on: true },
-  roadwork: { label: "Roadworks", path: "roadworks", color: "--roadwork", on: false },
+  disruption: { label: "Disruptions", path: "traffic-announcements", color: "--disruption", marker: "triangle", on: true },
+  roadwork: { label: "Roadworks", path: "roadworks", color: "--roadwork", marker: "line", on: false },
 };
 const EVENTS_REFRESH_MS = 5 * 60_000;
 const ANNOUNCEMENT_TYPES = {
@@ -641,7 +644,28 @@ const FEATURES_EN = {
   "Liikenne on jonoutunut": "Queues",
 };
 
-// Lines get the message colour; points are dots with a ring, so they read apart from the counters.
+// A circle marker drawn as a triangle on the canvas renderer; clicks still hit its circle.
+const TriangleMarker = L.CircleMarker.extend({
+  _updatePath() {
+    const r = this._renderer, ctx = r._ctx, p = this._point, s = this._radius;
+    if (!r._drawing || this._empty()) return;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y - s * 1.15);
+    ctx.lineTo(p.x + s, p.y + s * 0.85);
+    ctx.lineTo(p.x - s, p.y + s * 0.85);
+    ctx.closePath();
+    r._fillStroke(ctx, this);
+  },
+});
+
+// The middle vertex of a line, where a disruption along a road gets its triangle.
+function lineMiddle(geometry) {
+  const coords = geometry.type === "MultiLineString" ? geometry.coordinates.flat() : geometry.coordinates;
+  const [lon, lat] = coords[Math.floor(coords.length / 2)];
+  return L.latLng(lat, lon);
+}
+
+// Lines get the message colour; points are dots (or triangles) with a ring, so they read apart from the counters.
 function eventStyle(ev, layer) {
   const point = layer instanceof L.CircleMarker;
   return {
@@ -650,16 +674,16 @@ function eventStyle(ev, layer) {
     opacity: 0.85,
     fillColor: css(ev.color),
     fillOpacity: 0.95,
-    radius: 6,
+    radius: layer instanceof TriangleMarker ? 7 : 6,
   };
 }
 
 function renderEvents() {
   const el = document.getElementById("events");
   el.innerHTML = Object.entries(EVENTS).map(([k, ev]) => {
-    const n = ev.error ? "–" : ev.layer ? ev.layer.getLayers().length : ev.on ? "…" : "";
+    const n = ev.error ? "–" : ev.layer ? ev.count : ev.on ? "…" : "";
     const title = ev.error ? ` title="Could not load (${escapeHtml(ev.error)})"` : "";
-    return `<button data-event="${k}" aria-pressed="${ev.on}"${title}><i class="line" style="background:var(${ev.color})"></i>${ev.label} ${n}</button>`;
+    return `<button data-event="${k}" aria-pressed="${ev.on}"${title}><i class="${ev.marker}" style="background:var(${ev.color})"></i>${ev.label} ${n}</button>`;
   }).join("");
   el.querySelectorAll("[data-event]").forEach((b) => {
     b.onclick = () => {
@@ -675,8 +699,9 @@ function renderEvents() {
 
 function showEvents(ev) {
   ev.layer.addTo(map);
-  // Under the counters, so a counter on a road with roadworks can still be clicked.
-  ev.layer.eachLayer((l) => l.bringToBack());
+  // Lines under the counters, so a counter on a road with roadworks can still be clicked; the few
+  // disruption triangles on top, so they aren't hidden by one.
+  ev.layer.eachLayer((l) => l instanceof TriangleMarker ? l.bringToFront() : l.bringToBack());
 }
 
 async function loadEvents(k) {
@@ -686,15 +711,28 @@ async function loadEvents(k) {
     const res = await fetch(`${TM_API}/${ev.path}?from=${now}&to=${now}`, { headers: { "Digitraffic-User": "lammap" } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const features = (await res.json()).features.filter((f) => f.geometry && f.properties.announcements?.length);
+    const marker = (latlng) => ev.marker === "triangle" ? new TriangleMarker(latlng) : L.circleMarker(latlng);
+    const extra = [];
+    const bind = (f, layer) => {
+      layer.setStyle(eventStyle(ev, layer));
+      layer.bindTooltip(escapeHtml(eventHeading(f.properties)), { sticky: true });
+      layer.bindPopup(() => eventPopup(ev, f.properties), { maxWidth: 320 });
+    };
     ev.layer?.remove();
     ev.layer = L.geoJSON(features, {
-      pointToLayer: (f, latlng) => L.circleMarker(latlng),
+      pointToLayer: (f, latlng) => marker(latlng),
       onEachFeature: (f, layer) => {
-        layer.setStyle(eventStyle(ev, layer));
-        layer.bindTooltip(escapeHtml(eventHeading(f.properties)), { sticky: true });
-        layer.bindPopup(() => eventPopup(ev, f.properties), { maxWidth: 320 });
+        bind(f, layer);
+        // Disruptions along a road also get a triangle, so they show at country scale too.
+        if (ev.marker === "triangle" && layer instanceof L.Polyline) {
+          const t = marker(lineMiddle(f.geometry));
+          bind(f, t);
+          extra.push(t);
+        }
       },
     });
+    for (const t of extra) ev.layer.addLayer(t);
+    ev.count = features.length;
     ev.loaded = Date.now();
     ev.error = null;
     if (ev.on) showEvents(ev);
