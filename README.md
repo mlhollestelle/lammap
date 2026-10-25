@@ -1,6 +1,6 @@
 # lammap
 
-An interactive map of Finland's LAM traffic counting stations, plus the City of Helsinki's own car, bicycle and pedestrian counters. Click or search for a counter to see its traffic for the last 30 or 365 days. Data comes from [Fintraffic / Digitraffic](https://www.digitraffic.fi/) and the [City of Helsinki](https://lidotiku.api.hel.fi/api/) (both CC BY 4.0).
+An interactive map of Finland's LAM traffic counting stations, plus the City of Helsinki's own car, bicycle and pedestrian counters and the Oulu region's cycle and pedestrian counters. Click or search for a counter to see its traffic for the last 30 or 365 days. Data comes from [Fintraffic / Digitraffic](https://www.digitraffic.fi/), the [City of Helsinki](https://lidotiku.api.hel.fi/api/) and [Oulunliikenne](https://wp.oulunliikenne.fi/avoin-data/) (all CC BY 4.0).
 
 The app is a single `index.html` with no build step.
 
@@ -24,6 +24,8 @@ It needs these repository settings:
 To try the script locally: `node scripts/ingest.mjs --days 30 --stations 101,102` (writes to `data/`).
 
 The Helsinki counters come from the city's [LIDO-TIKU API](https://lidotiku.api.hel.fi/swagger): its own LAM stations (`HEL LAM`, motor vehicles plus one bicycle station) and the Eco-Counter cycle and pedestrian counters. The same workflow runs `scripts/ingest-hel.mjs`, which stores hourly sums per counter in the same format under `hel/<counter>.json`, with the station list in `hel/stations.json`. The API's Fintraffic stations are left out, since the map already has them, as are the traffic light loops and the per-lane radar loops. Days cut short by an outage are dropped rather than shown as low traffic. To try it locally: `node scripts/ingest-hel.mjs --days 30` (all counters, a couple of minutes) or `--counters 4667,100008546`.
+
+The Oulu counters come from Oulunliikenne's [GraphQL API](https://wp.oulunliikenne.fi/avoin-data/pyorailykavely/graphql-rajapinnat/) (`ecoCounterSites` and `ecoCounterSiteData`): Eco-Counter devices run by the City of Oulu and the ELY Centre, in Oulu, Kempele, Liminka and Kiiminki. The same workflow runs `scripts/ingest-oulu.mjs`, which stores hourly sums per counter under `oulu/<counter>.json`, with the station list in `oulu/stations.json`. A site that counts both cyclists and pedestrians becomes two counters (`<site>-bike` and `<site>-pedestrian`), and the page shows a button for each. Days where a channel misses hours are dropped. A full year takes about 5 minutes: `node scripts/ingest-oulu.mjs --days 365`, or `--counters raatti-bike,OULU119-bike` for a few.
 
 Disruptions and roadworks are Digitraffic's [traffic messages](https://www.digitraffic.fi/en/road-traffic/#traffic-messages) (`/api/traffic-message/v2/traffic-announcements` and `/roadworks`), fetched live by the page and limited to the ones valid right now. They refresh every 5 minutes while shown. The roadworks feed is about 1 MB, so it only loads once switched on. The messages are in Finnish; the common restrictions are translated in `FEATURES_EN`.
 
