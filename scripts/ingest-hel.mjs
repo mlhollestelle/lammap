@@ -22,6 +22,9 @@ const MIN_GAP_MS = 500;
 const CHUNK_DAYS = 60; // 60 days x 24 h x 2 directions stays well below the API's 10,000 rows per page
 // The source lists also hold test devices outside Helsinki (e.g. a "Logger" in France).
 const BBOX = { south: 60.05, north: 60.4, west: 24.75, east: 25.3 };
+// Copies of devices outside Helsinki, which scripts/ingest-eco.mjs shows with their own city:
+// "Espoonlahti_Clone" is Espoo's Länsituulenkuja counter in Tapiola.
+const SKIP = new Set([100133755]);
 // Compass directions as the city reports them; north and east are direction 1.
 const DIRECTIONS = {
   Pohjoiseen: ["d1", "Northbound"],
@@ -86,7 +89,7 @@ async function listCounters() {
     const gj = await getJson(`${API}/counters/?${new URLSearchParams({ source, page_size: "1000" })}`);
     for (const f of gj.results.features) {
       const [lon, lat] = f.geometry.coordinates;
-      if (lat < BBOX.south || lat > BBOX.north || lon < BBOX.west || lon > BBOX.east) continue;
+      if (lat < BBOX.south || lat > BBOX.north || lon < BBOX.west || lon > BBOX.east || SKIP.has(f.properties.id)) continue;
       out.push({ id: f.properties.id, name: f.properties.name, source, lat, lon });
     }
   }
