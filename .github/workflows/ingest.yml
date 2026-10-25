@@ -53,6 +53,7 @@ jobs:
           aws s3 sync "$BUCKET/stations" data/stations --endpoint-url "$ENDPOINT" --only-show-errors
           aws s3 sync "$BUCKET/hel" data/hel --endpoint-url "$ENDPOINT" --only-show-errors
           aws s3 sync "$BUCKET/oulu" data/oulu --endpoint-url "$ENDPOINT" --only-show-errors
+          aws s3 sync "$BUCKET/eco" data/eco --endpoint-url "$ENDPOINT" --only-show-errors
 
       - name: Fetch new days from Digitraffic
         run: |
@@ -69,6 +70,11 @@ jobs:
       - name: Fetch Oulu counters
         if: ${{ !cancelled() }}
         run: node scripts/ingest-oulu.mjs --days "$DAYS"
+
+      # Cycle and pedestrian counters on Eco-Counter's public pages: Espoo, Vantaa, Lahti, Joensuu and others.
+      - name: Fetch Eco-Counter counters
+        if: ${{ !cancelled() }}
+        run: node scripts/ingest-eco.mjs --days "$DAYS"
 
       # Also after a failed fetch, so stations that did succeed are kept.
       - name: Upload to R2

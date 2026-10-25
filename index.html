@@ -406,7 +406,7 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
       </a>
     </div>
   </header>
-  <div id="detail"><p class="muted">Click a counter on the map to see its traffic for the last 30 or 365 days: Fintraffic's LAM stations across Finland, the City of Helsinki's own car, bicycle and pedestrian counters, and the Oulu region's cycle and pedestrian counters.</p></div>
+  <div id="detail"><p class="muted">Click a counter on the map to see its traffic for the last 30 or 365 days: Fintraffic's LAM stations across Finland, the City of Helsinki's own car, bicycle and pedestrian counters, and cycle and pedestrian counters in Oulu, Espoo, Vantaa, Lahti, Joensuu and other cities.</p></div>
 </aside>
 <div id="tip"></div>
 
@@ -419,10 +419,15 @@ const API = "https://tie.digitraffic.fi/api/tms/v1";
 const HEL_API = "https://lidotiku.api.hel.fi/api";
 // The Oulu region's cycle and pedestrian counters (scripts/ingest-oulu.mjs), from a GraphQL API without CSV.
 const OULU_API = "https://wp.oulunliikenne.fi/avoin-data/pyorailykavely/graphql-rajapinnat/";
-// Counters outside Digitraffic, by station kind (also the bucket folder of their files).
+// Cities' cycle and pedestrian counters on Eco-Counter's public pages (scripts/ingest-eco.mjs), each
+// with its municipality; the pages are linked per organisation.
+const ECO_PAGE = "https://data.eco-counter.com/ParcPublic/?id=";
+// Counters outside Digitraffic, by station kind (also the bucket folder of their files). Eco-Counter
+// stations name their own city.
 const CITIES = {
   hel: { name: "Helsinki", count: "City of Helsinki counters" },
-  oulu: { name: "Oulu", count: "Oulu region counters" },
+  oulu: { name: "Oulu", count: "Oulu counters" },
+  eco: { name: null, count: "Eco-Counter counters" },
 };
 // What a station counts. Digitraffic's LAM stations count motor vehicles.
 const MODES = {
@@ -481,7 +486,7 @@ const map = L.map("map", { preferCanvas: true }).setView([64.5, 26], 5);
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 18,
   referrerPolicy: "strict-origin-when-cross-origin",
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Data: Fintraffic / <a href="https://www.digitraffic.fi/">Digitraffic</a>, <a href="https://lidotiku.api.hel.fi/api/">City of Helsinki</a>, <a href="https://wp.oulunliikenne.fi/avoin-data/">Oulunliikenne</a>, CC BY 4.0',
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Data: Fintraffic / <a href="https://www.digitraffic.fi/">Digitraffic</a>, <a href="https://lidotiku.api.hel.fi/api/">City of Helsinki</a>, <a href="https://wp.oulunliikenne.fi/avoin-data/">Oulunliikenne</a>, CC BY 4.0; cities via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
 }).addTo(map);
 
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
@@ -519,9 +524,10 @@ document.getElementById("themeToggle").setAttribute("aria-pressed", String(isDar
 
 function prettyName(name) { return name.replace(/_/g, " "); }
 // "Station 149 · Name" for LAM stations; Helsinki counters are named by the city, sometimes with a
-// sequence number or feed name in front ("4_Aleksanterinkatu", "Formula : Lauttasaaren silta etelä").
-function displayName(st) { return st.kind === "hel" ? prettyName(st.name.replace(/^([\d.]+_|Formula : )/, "")) : prettyName(st.name); }
-function stationLabel(st) { return st.kind === "lam" ? `${st.tms} · ${displayName(st)}` : `${displayName(st)} · ${CITIES[st.kind].name}`; }
+// sequence number or feed name in front ("4_Aleksanterinkatu", "Formula : Lauttasaaren silta etelä"), and
+// so are some on Eco-Counter's pages.
+function displayName(st) { return st.kind === "lam" || st.kind === "oulu" ? prettyName(st.name) : prettyName(st.name.replace(/^([\d.]+_|Formula : )/, "")); }
+function stationLabel(st) { return st.kind === "lam" ? `${st.tms} · ${displayName(st)}` : `${displayName(st)} · ${st.city ?? CITIES[st.kind].name}`; }
 
 // City counters that stopped reporting more than this many days before the newest data are grey.
 const CITY_STALE_DAYS = 7;
@@ -536,6 +542,8 @@ async function loadCityStations(kind) {
       id: s.id,
       name: s.name,
       source: s.source,
+      city: s.city,
+      org: s.org,
       mode: s.mode,
       dirs: s.dirs,
       last: s.last,
@@ -836,9 +844,9 @@ const cache = new Map();
 
 // Link to the original CSV for the selected window: Digitraffic's report, or the hourly (daily for
 // long windows, which would pass the API's page limit) sums from the City of Helsinki's API. Oulu's API
-// has no CSV.
+// has no CSV, nor do Eco-Counter's pages.
 function historyUrl(st) {
-  if (st.kind === "oulu") return null;
+  if (st.kind === "oulu" || st.kind === "eco") return null;
   if (st.kind === "hel") {
     const p = new URLSearchParams({
       counter: String(st.id),
@@ -943,7 +951,9 @@ let requestSeq = 0;
 function headHtml(st) {
   const what = st.kind === "lam"
     ? `Station ${st.tms}${st.inactive ? " · temporarily removed" : ""}`
-    : (st.kind === "hel" ? `City of Helsinki ${MODES[st.mode].noun} · ${escapeHtml(st.source)}` : `${escapeHtml(st.source)} ${MODES[st.mode].noun}`) +
+    : { hel: `City of Helsinki ${MODES[st.mode].noun} · ${escapeHtml(st.source)}`,
+        oulu: `${escapeHtml(st.source)} ${MODES[st.mode].noun}`,
+        eco: `${escapeHtml(st.city)} ${MODES[st.mode].noun} · Eco-Counter` }[st.kind] +
       (st.inactive ? ` · no data since ${fmtDate(fromKey(st.last))}` : "");
   return `
     <h2>${escapeHtml(displayName(st))}</h2>
@@ -1093,6 +1103,7 @@ function renderDetail(st, report, dirNames) {
       ${{
         hel: `Source: City of Helsinki, <a href="${HEL_API}/">LIDO-TIKU API</a> (${escapeHtml(st.source)}), CC BY 4.0. Hourly sums, uncorrected; days cut short by an outage are left out.`,
         oulu: `Source: ${escapeHtml(st.source)} Eco-Counter via <a href="${OULU_API}">Oulunliikenne's GraphQL API</a>, CC BY 4.0. Hourly sums, uncorrected; days with missing hours are left out.`,
+        eco: `Source: the city's <a href="${ECO_PAGE}${st.org}">public Eco-Counter page</a>. Hourly sums of all channels, uncorrected; days with missing hours or no counts at all are left out.`,
         lam: `Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes).`,
       }[st.kind]} Updated daily${updated ? `, last on ${fmtDate(updated)}` : ""}.
       ${historyUrl(st) ? `<a href="${historyUrl(st)}">Download CSV</a>` : ""}
