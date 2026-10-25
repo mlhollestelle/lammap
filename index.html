@@ -115,6 +115,10 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
     --station-walk: var(--marker);
     --station-off: var(--line-strong);
     --station-sel: var(--pink);
+    --flow-free: var(--moss);
+    --flow-heavy: var(--marker);
+    --flow-slow: var(--roadwork);
+    --flow-jam: var(--disruption);
     --lane-1: var(--pink);
     --lane-2: var(--moss);
     --lane-3: var(--blue);
@@ -250,6 +254,10 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
   .modes button i.line { width: 12px; height: 4px; border-radius: 2px; vertical-align: 1px; }
   .modes button i.triangle { width: 10px; height: 9px; border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); }
   .modes button[aria-pressed="false"] i.triangle { background: var(--ink-muted) !important; box-shadow: none; }
+  .modes button i.arrow, .flow-key i { width: 9px; height: 10px; border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 50% 72%, 0 100%); }
+  .modes button[aria-pressed="false"] i.arrow { background: var(--ink-muted) !important; box-shadow: none; }
+  .flow-key { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; font: 500 12px/26px var(--font-mono); color: var(--ink-muted); }
+  .flow-key i { display: inline-block; margin-right: 5px; vertical-align: -1px; }
   .lanes-dir { align-self: center; font-weight: 600; margin-right: 4px; }
   .lanes button i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
   .lanes button[aria-pressed="false"] { opacity: .5; border-style: dashed; }
@@ -388,6 +396,7 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
       <div class="sub" id="stationCount">Loading stations…</div>
       <div class="modes" id="modes" role="group" aria-label="Show on map"></div>
       <div class="modes" id="events" role="group" aria-label="Traffic messages on map"></div>
+      <div class="modes" id="flow" role="group" aria-label="Traffic state on map"></div>
     </div>
     <div class="find">
       <input id="search" type="search" placeholder="Search counter by name or number" autocomplete="off" aria-label="Search stations">
@@ -512,6 +521,7 @@ function themeChanged() {
   for (const st of stations) st.marker?.setStyle(markerStyle(st, st.marker === selectedMarker));
   if (fdState?.dirs) drawFd();
   for (const ev of Object.values(EVENTS)) ev.layer?.eachLayer((l) => l.setStyle(eventStyle(ev, l)));
+  FLOW.layer?.eachLayer((l) => l.setStyle(arrowStyle(l.options.pct)));
 }
 document.getElementById("themeToggle").addEventListener("click", () => {
   const theme = isDark() ? "light" : "dark";
@@ -570,6 +580,7 @@ function renderModes() {
         // The selected station stays on the map.
         if (shownModes.has(k) || st.marker === selectedMarker) st.marker.addTo(map); else st.marker.remove();
       }
+      if (k === "car") showFlow();
       renderModes();
     };
   });
@@ -592,6 +603,7 @@ async function loadStations() {
       tms: f.properties.tmsNumber, // the history API is keyed by tmsNumber, NOT by feature id
       name: f.properties.name,
       mode: "car",
+      bearing: f.properties.bearing, // the heading of direction 1, in degrees
       inactive: f.properties.collectionStatus !== "GATHERING",
       lat: f.geometry.coordinates[1],
       lon: f.geometry.coordinates[0],
@@ -601,11 +613,12 @@ async function loadStations() {
     stations = [...lam, ...cities];
     for (const st of stations) {
       st.marker = L.circleMarker([st.lat, st.lon], markerStyle(st, false))
-        .bindTooltip(escapeHtml(stationLabel(st)))
+        .bindTooltip(() => escapeHtml(stationLabel(st)) + flowTip(st))
         .on("click", () => selectStation(st))
         .addTo(map);
     }
     for (const ev of Object.values(EVENTS)) if (ev.on && ev.layer) showEvents(ev);
+    if (FLOW.values) drawFlow();
     const active = lam.filter((s) => !s.inactive).length;
     document.getElementById("stationCount").textContent =
       `${lam.length} LAM stations (${active} active, ${lam.length - active} temporarily removed, grey)` +
@@ -814,6 +827,123 @@ function eventPopup(ev, p) {
     <div class="foot">${escapeHtml(a.sender ?? "Fintraffic")} · <a href="https://liikennetilanne.fintraffic.fi/" target="_blank" rel="noopener">Fintraffic traffic situation</a></div>
   </div>`;
 }
+
+// ---------- traffic state ----------
+// Digitraffic's live "liikennetilanne" sensors: the average speed of the last 5 minutes per direction,
+// as a percentage of the station's free-flow speed. Each LAM station gets an arrow per direction on
+// the right-hand side of the road, coloured by that percentage. Digitraffic publishes no classes, so
+// these thresholds are lammap's own.
+const FLOW_API = `${API}/stations/data`;
+const FLOW_REFRESH_MS = 2 * 60_000;
+const FLOW_MAX_AGE_MS = 30 * 60_000; // older values are a station that stopped reporting
+const FLOW_SENSORS = { KESKINOPEUS_5MIN_LIUKUVA_SUUNTA1_VVAPAAS1: 0, KESKINOPEUS_5MIN_LIUKUVA_SUUNTA2_VVAPAAS2: 1 };
+const FLOW_CLASSES = [
+  { min: 90, label: "≥90%", color: "--flow-free" },
+  { min: 75, label: "75–90", color: "--flow-heavy" },
+  { min: 50, label: "50–75", color: "--flow-slow" },
+  { min: -Infinity, label: "<50", color: "--flow-jam" },
+];
+const FLOW = { on: true, values: null, layer: null, count: 0, loaded: 0, error: null };
+const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+
+function flowColor(pct) { return css(FLOW_CLASSES.find((c) => pct >= c.min).color); }
+function arrowStyle(pct) { return { color: css("--surface"), weight: 1, fillColor: flowColor(pct), fillOpacity: 1 }; }
+
+// A small dart pointing along "heading" (degrees), drawn beside the station on the right of the
+// direction of travel. Its radius covers the dart, so canvas redraws don't clip it. Zoomed out,
+// only the slowdowns are drawn, so the country view isn't a carpet of green.
+const ARROW_OFFSET = 9, ARROW_SIZE = 5, FLOW_ALL_ZOOM = 9;
+const ArrowMarker = L.CircleMarker.extend({
+  _updatePath() {
+    const r = this._renderer, ctx = r._ctx, p = this._point, s = ARROW_SIZE;
+    if (!r._drawing || this._empty()) return;
+    if (this.options.pct >= FLOW_CLASSES[0].min && this._map.getZoom() < FLOW_ALL_ZOOM) return;
+    const a = (this.options.heading * Math.PI) / 180;
+    const d = [Math.sin(a), -Math.cos(a)], n = [Math.cos(a), Math.sin(a)]; // forward, right
+    const at = (f, side) => [p.x + n[0] * ARROW_OFFSET + d[0] * f * s + n[0] * side * s, p.y + n[1] * ARROW_OFFSET + d[1] * f * s + n[1] * side * s];
+    ctx.beginPath();
+    ctx.moveTo(...at(1, 0));
+    ctx.lineTo(...at(-0.8, 0.75));
+    ctx.lineTo(...at(-0.35, 0));
+    ctx.lineTo(...at(-0.8, -0.75));
+    ctx.closePath();
+    r._fillStroke(ctx, this);
+  },
+});
+
+function renderFlow() {
+  const el = document.getElementById("flow");
+  const n = FLOW.error ? "–" : FLOW.values ? FLOW.count : FLOW.on ? "…" : "";
+  const title = FLOW.error ? ` title="Could not load (${escapeHtml(FLOW.error)})"` : "";
+  const key = FLOW.on && FLOW.values
+    ? `<span class="flow-key">${FLOW_CLASSES.map((c) => `<span><i style="background:var(${c.color})"></i>${c.label}</span>`).join("")}<span>of free-flow speed</span></span>`
+    : "";
+  el.innerHTML = `<button aria-pressed="${FLOW.on}"${title}><i class="arrow" style="background:var(--flow-free)"></i>Traffic state ${n}</button>${key}`;
+  el.querySelector("button").onclick = () => {
+    FLOW.on = !FLOW.on;
+    if (FLOW.on && Date.now() - FLOW.loaded > FLOW_REFRESH_MS) loadFlow();
+    showFlow();
+    renderFlow();
+  };
+}
+
+// Hidden with the motor vehicle counters, since the arrows belong to them.
+function showFlow() {
+  if (FLOW.layer && FLOW.on && shownModes.has("car")) FLOW.layer.addTo(map); else FLOW.layer?.remove();
+}
+
+async function loadFlow() {
+  try {
+    const res = await fetch(FLOW_API, { headers: { "Digitraffic-User": "lammap" } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const since = Date.now() - FLOW_MAX_AGE_MS;
+    FLOW.values = new Map();
+    for (const s of (await res.json()).stations) {
+      const v = [null, null];
+      for (const x of s.sensorValues) {
+        if (x.name in FLOW_SENSORS && Date.parse(x.timeWindowEnd ?? x.measuredTime) >= since) v[FLOW_SENSORS[x.name]] = x.value;
+      }
+      if (v[0] != null || v[1] != null) FLOW.values.set(s.id, v);
+    }
+    FLOW.loaded = Date.now();
+    FLOW.error = null;
+    if (stations.length) drawFlow();
+  } catch (e) {
+    FLOW.error = e.message;
+  }
+  renderFlow();
+}
+
+function drawFlow() {
+  FLOW.layer?.remove();
+  FLOW.layer = L.layerGroup();
+  FLOW.count = 0;
+  for (const st of stations) {
+    const v = st.kind === "lam" && !st.inactive && st.bearing != null && FLOW.values.get(st.id);
+    if (!v) continue;
+    FLOW.count++;
+    v.forEach((pct, i) => {
+      if (pct == null) return;
+      const heading = st.bearing + i * 180;
+      FLOW.layer.addLayer(new ArrowMarker([st.lat, st.lon], { ...arrowStyle(pct), radius: ARROW_OFFSET + ARROW_SIZE, heading, pct, interactive: false }));
+    });
+  }
+  showFlow();
+  renderFlow();
+}
+
+// "NW 93% · SE 87% of free-flow speed" under a LAM station's name.
+function flowTip(st) {
+  const v = FLOW.on && st.bearing != null && FLOW.values?.get(st.id);
+  if (!v) return "";
+  const dir = (i) => COMPASS[Math.round(((st.bearing + i * 180) % 360) / 45) % 8];
+  const parts = v.map((pct, i) => pct == null ? null : `${dir(i)} ${Math.round(pct)}%`).filter(Boolean);
+  return `<br><span class="muted">${parts.join(" · ")} of free-flow speed</span>`;
+}
+
+setInterval(() => {
+  if (!document.hidden && FLOW.on) loadFlow();
+}, FLOW_REFRESH_MS);
 
 // ---------- search ----------
 const searchEl = document.getElementById("search");
@@ -1551,6 +1681,8 @@ function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&a
 loadStations();
 renderEvents();
 for (const k of Object.keys(EVENTS)) if (EVENTS[k].on) loadEvents(k);
+renderFlow();
+if (FLOW.on) loadFlow();
 </script>
 </body>
 </html>
