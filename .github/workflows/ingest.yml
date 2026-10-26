@@ -16,6 +16,9 @@ on:
       fd_days:
         description: Days of 5-minute lane data to keep (only missing days are fetched, older days are deleted)
         default: "7"
+      nor_minutes:
+        description: Minutes the Norwegian counters may take (a full year needs about 6 hours over several runs)
+        default: "60"
 
 permissions:
   contents: read
@@ -41,6 +44,7 @@ jobs:
       DAYS: ${{ inputs.days || '7' }}
       SKIP_EXISTING: ${{ inputs.skip_existing && '--skip-existing' || '' }}
       FD_DAYS: ${{ inputs.fd_days || '7' }}
+      NOR_MINUTES: ${{ inputs.nor_minutes || '60' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -54,6 +58,7 @@ jobs:
           aws s3 sync "$BUCKET/hel" data/hel --endpoint-url "$ENDPOINT" --only-show-errors
           aws s3 sync "$BUCKET/oulu" data/oulu --endpoint-url "$ENDPOINT" --only-show-errors
           aws s3 sync "$BUCKET/eco" data/eco --endpoint-url "$ENDPOINT" --only-show-errors
+          aws s3 sync "$BUCKET/nor" data/nor --endpoint-url "$ENDPOINT" --only-show-errors
 
       - name: Fetch new days from Digitraffic
         run: |
@@ -75,6 +80,14 @@ jobs:
       - name: Fetch Eco-Counter counters
         if: ${{ !cancelled() }}
         run: node scripts/ingest-eco.mjs --days "$DAYS"
+
+      # Statens vegvesen's car and bicycle counters in Norway. Stops after NOR_MINUTES; a backfill
+      # continues where it stopped when run again with skip_existing.
+      - name: Fetch Norwegian counters
+        if: ${{ !cancelled() }}
+        run: |
+          [[ "$NOR_MINUTES" =~ ^[0-9]+$ ]] || { echo "nor_minutes must be a number"; exit 1; }
+          node scripts/ingest-nor.mjs --days "$DAYS" $SKIP_EXISTING --max-minutes "$NOR_MINUTES"
 
       # Also after a failed fetch, so stations that did succeed are kept.
       - name: Upload to R2
