@@ -830,8 +830,8 @@ function eventPopup(ev, p) {
 
 // ---------- traffic state ----------
 // Digitraffic's live "liikennetilanne" sensors: the average speed of the last 5 minutes per direction,
-// as a percentage of the station's free-flow speed. Each LAM station gets an arrow per direction on
-// the right-hand side of the road, coloured by that percentage. Digitraffic publishes no classes, so
+// as a percentage of the station's free-flow speed. Each LAM station gets an arrow per direction,
+// ahead of the dot in that direction of travel, coloured by that percentage. Digitraffic publishes no classes, so
 // these thresholds are lammap's own.
 const FLOW_API = `${API}/stations/data`;
 const FLOW_REFRESH_MS = 2 * 60_000;
@@ -849,10 +849,10 @@ const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
 function flowColor(pct) { return css(FLOW_CLASSES.find((c) => pct >= c.min).color); }
 function arrowStyle(pct) { return { color: css("--surface"), weight: 1, fillColor: flowColor(pct), fillOpacity: 1 }; }
 
-// A small dart pointing along "heading" (degrees), drawn beside the station on the right of the
-// direction of travel. Its radius covers the dart, so canvas redraws don't clip it. Zoomed out,
+// A small dart pointing along "heading" (degrees), drawn just ahead of the station, so the two
+// directions sit in front of and behind the dot. Its radius covers the dart, so canvas redraws don't clip it. Zoomed out,
 // only the slowdowns are drawn, so the country view isn't a carpet of green.
-const ARROW_OFFSET = 9, ARROW_SIZE = 5, FLOW_ALL_ZOOM = 9;
+const ARROW_OFFSET = 10, ARROW_SIZE = 5, FLOW_ALL_ZOOM = 9;
 const ArrowMarker = L.CircleMarker.extend({
   _updatePath() {
     const r = this._renderer, ctx = r._ctx, p = this._point, s = ARROW_SIZE;
@@ -860,7 +860,7 @@ const ArrowMarker = L.CircleMarker.extend({
     if (this.options.pct >= FLOW_CLASSES[0].min && this._map.getZoom() < FLOW_ALL_ZOOM) return;
     const a = (this.options.heading * Math.PI) / 180;
     const d = [Math.sin(a), -Math.cos(a)], n = [Math.cos(a), Math.sin(a)]; // forward, right
-    const at = (f, side) => [p.x + n[0] * ARROW_OFFSET + d[0] * f * s + n[0] * side * s, p.y + n[1] * ARROW_OFFSET + d[1] * f * s + n[1] * side * s];
+    const at = (f, side) => [p.x + d[0] * (ARROW_OFFSET + f * s) + n[0] * side * s, p.y + d[1] * (ARROW_OFFSET + f * s) + n[1] * side * s];
     ctx.beginPath();
     ctx.moveTo(...at(1, 0));
     ctx.lineTo(...at(-0.8, 0.75));
