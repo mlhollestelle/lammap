@@ -615,7 +615,7 @@ async function loadStations() {
     stations = [...lam, ...cities];
     for (const st of stations) {
       st.marker = L.circleMarker([st.lat, st.lon], markerStyle(st, false))
-        .bindTooltip(() => escapeHtml(stationLabel(st)) + flowTip(st))
+        .bindTooltip(() => escapeHtml(stationLabel(st)) + flowTip(st) + pulseTip(st))
         .on("click", () => selectStation(st))
         .addTo(map);
     }
@@ -900,12 +900,17 @@ async function loadFlow() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const since = Date.now() - FLOW_MAX_AGE_MS;
     FLOW.values = new Map();
+    PULSE.vph = new Map();
     for (const s of (await res.json()).stations) {
       const v = [null, null];
+      let vph = null;
       for (const x of s.sensorValues) {
-        if (x.name in FLOW_SENSORS && Date.parse(x.timeWindowEnd ?? x.measuredTime) >= since) v[FLOW_SENSORS[x.name]] = x.value;
+        if (Date.parse(x.timeWindowEnd ?? x.measuredTime) < since) continue;
+        if (x.name in FLOW_SENSORS) v[FLOW_SENSORS[x.name]] = x.value;
+        if (PULSE_SENSORS.has(x.name)) vph = (vph ?? 0) + x.value;
       }
       if (v[0] != null || v[1] != null) FLOW.values.set(s.id, v);
+      if (vph != null) PULSE.vph.set(s.id, vph);
     }
     FLOW.loaded = Date.now();
     FLOW.error = null;
@@ -943,9 +948,70 @@ function flowTip(st) {
   return `<br><span class="muted">${parts.join(" · ")} of free-flow speed</span>`;
 }
 
+// "1,572 veh/h now" under a LAM station's name.
+function pulseTip(st) {
+  const vph = st.kind === "lam" ? PULSE.vph?.get(st.id) : null;
+  return vph == null ? "" : `<br><span class="muted">${fmtInt(vph)} veh/h now</span>`;
+}
+
 setInterval(() => {
   if (!document.hidden && FLOW.on) loadFlow();
 }, FLOW_REFRESH_MS);
+
+// ---------- vehicle pulse ----------
+// Each LAM station with live data sends out a ring for every vehicle, at the rate of the last 5 minutes'
+// flow (both directions, all lanes): 3600 veh/h is a ring a second. The rings are drawn on their own canvas
+// in a pane under the markers, each station with its own phase so they don't beat together.
+const PULSE_SENSORS = new Set(["OHITUKSET_5MIN_LIUKUVA_SUUNTA1", "OHITUKSET_5MIN_LIUKUVA_SUUNTA2"]);
+const PULSE_MS = 900, PULSE_GROW = 11;
+const PULSE = { vph: null, phase: new Map() };
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const pulseCanvas = L.DomUtil.create("canvas", "pulse", map.createPane("pulse"));
+map.getPane("pulse").style.zIndex = 390;
+map.getPane("pulse").style.pointerEvents = "none";
+
+// Follows the map's box, which also changes when the station panel opens.
+function sizePulse() {
+  const el = map.getContainer(), dpr = devicePixelRatio || 1;
+  const w = el.clientWidth, h = el.clientHeight;
+  if (pulseCanvas.width === w * dpr && pulseCanvas.height === h * dpr) return;
+  pulseCanvas.width = w * dpr;
+  pulseCanvas.height = h * dpr;
+  pulseCanvas.style.width = `${w}px`;
+  pulseCanvas.style.height = `${h}px`;
+}
+// The rings would sit at the old zoom while Leaflet animates to the new one.
+map.on("zoomstart", () => { pulseCanvas.style.visibility = "hidden"; });
+map.on("zoomend", () => { pulseCanvas.style.visibility = ""; });
+
+function drawPulse(now) {
+  requestAnimationFrame(drawPulse);
+  sizePulse();
+  const ctx = pulseCanvas.getContext("2d"), dpr = devicePixelRatio || 1;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, pulseCanvas.width, pulseCanvas.height);
+  if (!PULSE.vph || !shownModes.has("car") || reducedMotion.matches) return;
+  L.DomUtil.setPosition(pulseCanvas, map.containerPointToLayerPoint([0, 0]));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.strokeStyle = css("--station");
+  ctx.lineWidth = 1.5;
+  const bounds = map.getBounds().pad(0.1);
+  for (const st of stations) {
+    const vph = st.kind === "lam" && !st.inactive && PULSE.vph.get(st.id);
+    if (!vph || !bounds.contains([st.lat, st.lon])) continue;
+    const period = 3_600_000 / vph, dur = Math.min(PULSE_MS, period * 0.8);
+    if (!PULSE.phase.has(st.id)) PULSE.phase.set(st.id, Math.random() * 3_600_000);
+    const t = (now + PULSE.phase.get(st.id)) % period;
+    if (t >= dur) continue;
+    const f = t / dur, r = (st.marker === selectedMarker ? 8 : 5) + f * PULSE_GROW;
+    const p = map.latLngToContainerPoint([st.lat, st.lon]);
+    ctx.globalAlpha = 0.85 * (1 - f);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, 2 * Math.PI);
+    ctx.stroke();
+  }
+}
+requestAnimationFrame(drawPulse);
 
 // ---------- search ----------
 const searchEl = document.getElementById("search");
