@@ -489,7 +489,9 @@ async function loadMeta() {
 }
 
 // ---------- map ----------
-const map = L.map("map", { preferCanvas: true }).setView([64.5, 26], 5);
+// On touch screens a 5px dot is hard to hit, so the canvas renderer counts taps up to 12px around a marker as a hit.
+const coarsePointer = matchMedia("(pointer: coarse)").matches;
+const map = L.map("map", { preferCanvas: true, renderer: L.canvas({ tolerance: coarsePointer ? 12 : 2 }) }).setView([64.5, 26], 5);
 // OSM's tile usage policy requires a valid Referer header; tiles requested
 // without one are served as an "access blocked" image.
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
