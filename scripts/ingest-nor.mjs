@@ -23,6 +23,8 @@ const MIN_GAP_MS = 300;
 // Points per request (as GraphQL aliases) and hours per point per request; the API allows at most 100.
 const BATCH = 50;
 const PAGE = 100;
+// Failed batches in a row (each after its retries) before the run gives up on the API.
+const MAX_FAILED_BATCHES = 3;
 const MODES = { VEHICLE: "car", BICYCLE: "bike" };
 // An hour counts only if the point covered at least this share of it; a day is kept only if every
 // hour counts (23 on the spring DST day).
@@ -77,7 +79,8 @@ async function gql(query, tries = 4) {
       if (res.ok) {
         const body = await res.json();
         if (body.data) return body;
-        err = Object.assign(new Error(body.errors?.[0]?.message ?? "no data"), { retry: false });
+        // The API answers a whole query with an error now and then, often for minutes at a time.
+        err = Object.assign(new Error(body.errors?.[0]?.message ?? "no data"), { retry: true, slow: true });
       } else {
         err = Object.assign(new Error(`HTTP ${res.status}`), { retry: res.status === 429 || res.status >= 500 });
       }
@@ -85,7 +88,7 @@ async function gql(query, tries = 4) {
       err = Object.assign(e, { retry: e.name === "TimeoutError" || e.name === "TypeError" });
     }
     if (!err.retry || i + 1 >= tries) throw err;
-    const delay = 5_000 * 2 ** i;
+    const delay = (err.slow ? 30_000 : 5_000) * 2 ** i;
     console.log(`  ${err.message}, retrying in ${delay / 1000}s`);
     await sleep(delay);
   }
@@ -235,7 +238,7 @@ async function main() {
 
   const list = new Map();
   const failed = [];
-  let fetched = 0, stopped = false;
+  let fetched = 0, stopped = false, failedInRow = 0, broken = false;
   for (let i = 0; i < points.length; i += BATCH) {
     if (Date.now() > DEADLINE) { stopped = true; break; }
     const batch = points.slice(i, i + BATCH);
@@ -245,8 +248,11 @@ async function main() {
     } catch (e) {
       console.error(`Batch ${i / BATCH + 1}: ${e.message}`);
       failed.push(...batch.map((p) => p.id));
+      // Batches failing even after the retries mean the API is down; the rest waits for the next run.
+      if (++failedInRow >= MAX_FAILED_BATCHES) { broken = true; break; }
       continue;
     }
+    failedInRow = 0;
     for (const p of batch) {
       if (!nodes.has(p.id)) continue;
       const file = path.join(dir, `${p.id}.json`);
@@ -274,10 +280,12 @@ async function main() {
   for (const [id, s] of previous) if (!list.has(id) && s.last >= OLDEST_KEPT) list.set(id, s);
   await writeFile(listFile, JSON.stringify([...list.values()]));
   const byMode = [...list.values()].reduce((a, s) => ({ ...a, [s.mode]: (a[s.mode] ?? 0) + 1 }), {});
-  console.log(`Done: ${fetched} points fetched, ${failed.length} failed${stopped ? ", stopped at the time limit" : ""}; ` +
+  const stop = stopped ? ", stopped at the time limit" : broken ? `, stopped after ${MAX_FAILED_BATCHES} failed batches in a row` : "";
+  console.log(`Done: ${fetched} points fetched, ${failed.length} failed${stop}; ` +
     `${list.size} points with data (${Object.entries(byMode).map(([m, n]) => `${n} ${m}`).join(", ")})`);
   if (stopped) console.log(`::warning::Norway: stopped at the time limit, run again with skip_existing to continue`);
-  if (failed.length > points.length * 0.1) process.exit(1);
+  if (broken) console.log(`::warning::Norway: the API kept failing, stopped; run again with skip_existing to continue`);
+  if (broken || failed.length > points.length * 0.1) process.exit(1);
   if (failed.length) console.log(`::warning::${failed.length} Norwegian points failed: ${failed.join(", ")}`);
 }
 
