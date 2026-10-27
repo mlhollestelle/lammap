@@ -167,8 +167,13 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
   #country {
     font: inherit; letter-spacing: inherit; text-transform: inherit; color: var(--ink);
     background: transparent; border: 0; border-bottom: 1px dashed var(--line-strong); border-radius: 0;
-    padding: 0 2px; margin-left: 2px; cursor: pointer;
+    padding: 0 16px 0 2px; margin-left: 2px; cursor: pointer;
+    appearance: none; -webkit-appearance: none;
+    /* Chevron drawn in the ink colour, so it follows the theme */
+    background: linear-gradient(45deg, transparent 50%, currentColor 50%) right 6px top 7px / 4px 4px no-repeat,
+      linear-gradient(-45deg, transparent 50%, currentColor 50%) right 2px top 7px / 4px 4px no-repeat;
   }
+  #country option { color: var(--ink); background: var(--surface); }
   #country:hover { border-bottom-style: solid; }
   #country:focus-visible { outline: 2px solid var(--pink-text); outline-offset: 2px; }
   h1 {
@@ -455,6 +460,19 @@ const COUNTRY = COUNTRIES[COUNTRY_ID];
 {
   const sel = document.getElementById("country");
   sel.innerHTML = Object.entries(COUNTRIES).map(([k, c]) => `<option value="${k}"${k === COUNTRY_ID ? " selected" : ""}>${c.name}</option>`).join("");
+  // Browsers size a select from its options without the uppercase and letter-spacing (and sometimes
+  // before Geist Mono loads), which clipped "FINLAND". Size it to the selected name as rendered.
+  const fit = () => {
+    const probe = document.createElement("span");
+    const cs = getComputedStyle(sel);
+    probe.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font:${cs.font};letter-spacing:${cs.letterSpacing};text-transform:${cs.textTransform}`;
+    probe.textContent = sel.options[sel.selectedIndex].text;
+    document.body.append(probe);
+    sel.style.width = `${Math.ceil(probe.getBoundingClientRect().width) + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + 2}px`;
+    probe.remove();
+  };
+  fit();
+  document.fonts?.ready.then(fit);
   // Switching reloads the page for the other country, without the selected station.
   sel.onchange = () => {
     const p = new URLSearchParams(location.search);
