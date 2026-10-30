@@ -13,8 +13,9 @@
 // So are the traffic light loops (LIVA), the per-lane radar loops (SmartJunction) and the sources
 // that no longer report.
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { addDays, countBy, dateWindow, fetchJson, fromKey, iso, key, mergeDirs, onePerPlace, parseArgs, readJson, throttle } from "./lib.mjs";
 
 const API = "https://lidotiku.api.hel.fi/api";
 const SOURCES = ["HEL LAM", "EcoCounter"];
@@ -45,43 +46,11 @@ const DAYS = Number(args.days ?? 7);
 const KEEP = Number(args.keep ?? 366);
 const OUT = args.out ?? "data";
 
-// ---------- dates (Finnish local date; the API reports local times with their offset) ----------
-function helsinkiToday() {
-  const s = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Helsinki" }).format(new Date());
-  const [y, m, d] = s.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d));
-}
-function addDays(date, n) { return new Date(date.getTime() + n * 86400000); }
-function iso(date) { return date.toISOString().slice(0, 10); }
-function key(date) { return iso(date).replace(/-/g, ""); }
+// Finnish local days; the API reports local times with their offset.
+const { END, START, OLDEST_KEPT } = dateWindow("Europe/Helsinki", DAYS, KEEP);
 
-const END = addDays(helsinkiToday(), -1);
-const START = addDays(END, -(DAYS - 1));
-const OLDEST_KEPT = key(addDays(END, -(KEEP - 1)));
-
-// ---------- fetch ----------
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-let lastRequest = 0;
-async function getJson(url, tries = 4) {
-  for (let i = 0; ; i++) {
-    const gap = lastRequest + MIN_GAP_MS - Date.now();
-    if (gap > 0) await sleep(gap);
-    lastRequest = Date.now();
-    let err;
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
-      if (res.ok) return await res.json();
-      err = Object.assign(new Error(`HTTP ${res.status}`), { retry: res.status === 429 || res.status >= 500 });
-    } catch (e) {
-      err = Object.assign(e, { retry: e.name === "TimeoutError" || e.name === "TypeError" });
-    }
-    if (!err.retry || i + 1 >= tries) throw err;
-    const delay = 5_000 * 2 ** i;
-    console.log(`  ${err.message}, retrying in ${delay / 1000}s`);
-    await sleep(delay);
-  }
-}
+const wait = throttle(MIN_GAP_MS);
+const getJson = (url) => fetchJson(url, { wait });
 
 async function listCounters() {
   const out = [];
@@ -150,7 +119,7 @@ function toDays(rows, mode) {
   // Days before START are unknown, so the first fetched day is only checked by its hour count.
   const firstKey = key(START);
   for (const [k, hours] of hoursSeen) {
-    const d = new Date(Date.UTC(+k.slice(0, 4), +k.slice(4, 6) - 1, +k.slice(6, 8)));
+    const d = fromKey(k);
     const cutStart = k > firstKey && !hoursSeen.has(key(addDays(d, -1))) && Math.min(...hours) > EDGE_FIRST_HOUR;
     const cutEnd = !hoursSeen.has(key(addDays(d, 1))) && Math.max(...hours) < EDGE_LAST_HOUR;
     // A whole day of zeros is a stuck counter, not an empty street.
@@ -158,20 +127,6 @@ function toDays(rows, mode) {
     if (cutStart || cutEnd || !total || (mode === "car" && hours.size < MIN_CAR_HOURS)) for (const m of Object.values(maps)) m.delete(k);
   }
   return { maps, dirNames };
-}
-
-// ---------- merge ----------
-async function readJson(file) {
-  try { return JSON.parse(await readFile(file, "utf8")); }
-  catch (e) { if (e.code === "ENOENT") return null; throw e; }
-}
-
-// Fetched days replace stored ones; stored days the new fetch lacks are kept.
-function merge(stored = {}, fetched) {
-  const out = {};
-  for (const [k, v] of Object.entries(stored)) if (k >= OLDEST_KEPT) out[k] = v;
-  for (const [k, v] of fetched) if (k >= OLDEST_KEPT) out[k] = v;
-  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
 }
 
 // ---------- main ----------
@@ -199,8 +154,7 @@ async function main() {
       const file = path.join(dir, `${c.id}.json`);
       const stored = (await readJson(file)) ?? {};
       const { maps, dirNames } = toDays(rows, mode);
-      const data = { id: c.id };
-      for (const d of ["all", "d1", "d2"]) data[d] = merge(stored[d], maps[d]);
+      const data = { id: c.id, ...mergeDirs(stored, maps, OLDEST_KEPT) };
       const dayKeys = [...new Set(["all", "d1", "d2"].flatMap((d) => Object.keys(data[d])))].sort();
       if (!dayKeys.length || !mode) continue; // never reported in the kept window
       await writeFile(file, JSON.stringify(data));
@@ -215,29 +169,12 @@ async function main() {
   }
   // Some devices are listed twice, under another name with the same position (e.g. "Formula : ..."),
   // with more or less the same data. Only the one with the most days goes on the map.
-  const best = new Map();
-  for (const s of list) {
-    const at = `${s.mode}:${s.lat.toFixed(5)},${s.lon.toFixed(5)}`;
-    if (!best.has(at) || s.days > best.get(at).days) best.set(at, s);
-  }
-  const kept = new Set(best.values());
-  for (const s of list) if (!kept.has(s)) console.log(`  ${s.id} ${s.name}: same place as a counter with more data, left off the map`);
-  const shown = list.filter((s) => kept.has(s));
+  const shown = onePerPlace(list);
+  for (const s of list) if (!shown.includes(s)) console.log(`  ${s.id} ${s.name}: same place as a counter with more data, left off the map`);
   await writeFile(listFile, JSON.stringify(shown));
-  const byMode = shown.reduce((a, s) => ({ ...a, [s.mode]: (a[s.mode] ?? 0) + 1 }), {});
-  console.log(`Done: ${shown.length} counters with data (${Object.entries(byMode).map(([m, n]) => `${n} ${m}`).join(", ")}), ${failed.length} failed`);
+  console.log(`Done: ${shown.length} counters with data (${countBy(shown, "mode")}), ${failed.length} failed`);
   if (failed.length > counters.length * 0.1) process.exit(1);
   if (failed.length) console.log(`::warning::${failed.length} Helsinki counters failed: ${failed.join(", ")}`);
-}
-
-function parseArgs(argv) {
-  const out = {};
-  for (let i = 0; i < argv.length; i++) {
-    const m = argv[i].match(/^--([\w-]+)(?:=(.*))?$/);
-    if (!m) throw new Error(`Unknown argument: ${argv[i]}`);
-    out[m[1]] = m[2] ?? (argv[i + 1] === undefined || argv[i + 1].startsWith("--") ? true : argv[++i]);
-  }
-  return out;
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

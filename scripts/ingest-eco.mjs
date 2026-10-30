@@ -15,8 +15,9 @@
 // paths, so all channels of a mode are summed. Helsinki's own counters come from scripts/ingest-hel.mjs,
 // so the Helsinki region page only adds the ones the city's API lacks.
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { addDays, countBy, dateWindow, fetchJson, iso, key, merge, onePerPlace, parseArgs, readJson, throttle } from "./lib.mjs";
 
 const API = "https://www.eco-visio.net/api/aladdin/1.0.0/pbl/publicwebpageplus";
 const HEL_API = "https://lidotiku.api.hel.fi/api";
@@ -63,44 +64,12 @@ const DAYS = Number(args.days ?? 7);
 const KEEP = Number(args.keep ?? 366);
 const OUT = args.out ?? "data";
 
-// ---------- dates (Finnish local date; the pages report local days and hours) ----------
-function helsinkiToday() {
-  const s = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Helsinki" }).format(new Date());
-  const [y, m, d] = s.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d));
-}
-function addDays(date, n) { return new Date(date.getTime() + n * 86400000); }
-function iso(date) { return date.toISOString().slice(0, 10); }
-function key(date) { return iso(date).replace(/-/g, ""); }
+// Finnish local days; the pages report local days and hours.
+const { END, START, OLDEST_KEPT } = dateWindow("Europe/Helsinki", DAYS, KEEP);
 function dmy(date) { const [y, m, d] = iso(date).split("-"); return `${d}/${m}/${y}`; }
 
-const END = addDays(helsinkiToday(), -1);
-const START = addDays(END, -(DAYS - 1));
-const OLDEST_KEPT = key(addDays(END, -(KEEP - 1)));
-
-// ---------- fetch ----------
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-let lastRequest = 0;
-async function getJson(url, tries = 4) {
-  for (let i = 0; ; i++) {
-    const gap = lastRequest + MIN_GAP_MS - Date.now();
-    if (gap > 0) await sleep(gap);
-    lastRequest = Date.now();
-    let err;
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
-      if (res.ok) return await res.json();
-      err = Object.assign(new Error(`HTTP ${res.status}`), { retry: res.status === 429 || res.status >= 500 });
-    } catch (e) {
-      err = Object.assign(e, { retry: e.name === "TimeoutError" || e.name === "TypeError" });
-    }
-    if (!err.retry || i + 1 >= tries) throw err;
-    const delay = 5_000 * 2 ** i;
-    console.log(`  ${err.message}, retrying in ${delay / 1000}s`);
-    await sleep(delay);
-  }
-}
+const wait = throttle(MIN_GAP_MS);
+const getJson = (url) => fetchJson(url, { wait });
 
 function metres(a, b) {
   const dy = (a.lat - b.lat) * 111_320;
@@ -166,20 +135,6 @@ function toDays(rows) {
   return all;
 }
 
-// ---------- merge ----------
-async function readJson(file) {
-  try { return JSON.parse(await readFile(file, "utf8")); }
-  catch (e) { if (e.code === "ENOENT") return null; throw e; }
-}
-
-// Fetched days replace stored ones; stored days the new fetch lacks are kept.
-function merge(stored = {}, fetched) {
-  const out = {};
-  for (const [k, v] of Object.entries(stored)) if (k >= OLDEST_KEPT) out[k] = v;
-  for (const [k, v] of fetched) if (k >= OLDEST_KEPT) out[k] = v;
-  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
-}
-
 // ---------- main ----------
 async function main() {
   const dir = path.join(OUT, "eco");
@@ -199,7 +154,7 @@ async function main() {
     try {
       const file = path.join(dir, `${c.id}.json`);
       const stored = (await readJson(file)) ?? {};
-      const data = { id: c.id, all: merge(stored.all, toDays(await fetchHours(c))) };
+      const data = { id: c.id, all: merge(stored.all, toDays(await fetchHours(c)), OLDEST_KEPT) };
       const dayKeys = Object.keys(data.all);
       if (dayKeys.length < MIN_DAYS) continue;
       await writeFile(file, JSON.stringify(data));
@@ -213,27 +168,11 @@ async function main() {
   }
   // Some sites are listed twice at the same position (e.g. two "Wolffintie" in Vaasa). Only the one
   // with the most days goes on the map.
-  const best = new Map();
-  for (const s of list) {
-    const at = `${s.mode}:${s.lat.toFixed(5)},${s.lon.toFixed(5)}`;
-    if (!best.has(at) || s.days > best.get(at).days) best.set(at, s);
-  }
-  const shown = list.filter((s) => best.get(`${s.mode}:${s.lat.toFixed(5)},${s.lon.toFixed(5)}`) === s);
+  const shown = onePerPlace(list);
   await writeFile(listFile, JSON.stringify(shown));
-  const byCity = shown.reduce((a, s) => ({ ...a, [s.city]: (a[s.city] ?? 0) + 1 }), {});
-  console.log(`Done: ${shown.length} counters with data (${Object.entries(byCity).map(([m, n]) => `${n} ${m}`).join(", ")}), ${failed.length} failed`);
+  console.log(`Done: ${shown.length} counters with data (${countBy(shown, "city")}), ${failed.length} failed`);
   if (failed.length > counters.length * 0.1) process.exit(1);
   if (failed.length) console.log(`::warning::${failed.length} Eco-Counter counters failed: ${failed.join(", ")}`);
-}
-
-function parseArgs(argv) {
-  const out = {};
-  for (let i = 0; i < argv.length; i++) {
-    const m = argv[i].match(/^--([\w-]+)(?:=(.*))?$/);
-    if (!m) throw new Error(`Unknown argument: ${argv[i]}`);
-    out[m[1]] = m[2] ?? (argv[i + 1] === undefined || argv[i + 1].startsWith("--") ? true : argv[++i]);
-  }
-  return out;
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

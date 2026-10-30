@@ -15,8 +15,9 @@
 // so --max-minutes stops the run in time and --skip-existing continues it: it skips points already
 // fetched from the start of the window ("from" in the station list).
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { addDays, countBy, dateWindow, httpError, iso, key, localDayHour, mergeDirs, parseArgs, readJson, throttle, timedFetch, withRetry } from "./lib.mjs";
 
 const API = "https://trafikkdata-api.atlas.vegvesen.no/";
 const MIN_GAP_MS = 300;
@@ -38,60 +39,29 @@ const OUT = args.out ?? "data";
 const SKIP_EXISTING = Boolean(args["skip-existing"]);
 const DEADLINE = args["max-minutes"] ? Date.now() + Number(args["max-minutes"]) * 60_000 : Infinity;
 
-// ---------- dates (Norwegian local date) ----------
-function osloToday() {
-  const s = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Oslo" }).format(new Date());
-  const [y, m, d] = s.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d));
-}
-function addDays(date, n) { return new Date(date.getTime() + n * 86400000); }
-function iso(date) { return date.toISOString().slice(0, 10); }
-function key(date) { return iso(date).replace(/-/g, ""); }
-const localHour = new Intl.DateTimeFormat("sv-SE", {
-  timeZone: "Europe/Oslo", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23",
-});
-
-const END = addDays(osloToday(), -1);
-const START = addDays(END, -(DAYS - 1));
-const OLDEST_KEPT = key(addDays(END, -(KEEP - 1)));
+// Norwegian local days.
+const { END, START, OLDEST_KEPT } = dateWindow("Europe/Oslo", DAYS, KEEP);
+const dayHour = localDayHour("Europe/Oslo");
 // A day either side in UTC, so the local days at both ends are whole; the extra hours are dropped.
 const FROM = `${iso(addDays(START, -1))}T00:00:00Z`;
 const TO = `${iso(addDays(END, 2))}T00:00:00Z`;
 
 // ---------- fetch ----------
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
+const wait = throttle(MIN_GAP_MS);
 // Returns { data, errors }: one point's error leaves the other aliases' data in place.
-let lastRequest = 0;
-async function gql(query, tries = 4) {
-  for (let i = 0; ; i++) {
-    const gap = lastRequest + MIN_GAP_MS - Date.now();
-    if (gap > 0) await sleep(gap);
-    lastRequest = Date.now();
-    let err;
-    try {
-      const res = await fetch(API, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "User-Agent": "lammap (github.com/mlhollestelle/lammap)" },
-        body: JSON.stringify({ query }),
-        signal: AbortSignal.timeout(120_000),
-      });
-      if (res.ok) {
-        const body = await res.json();
-        if (body.data) return body;
-        // The API answers a whole query with an error now and then, often for minutes at a time.
-        err = Object.assign(new Error(body.errors?.[0]?.message ?? "no data"), { retry: true, slow: true });
-      } else {
-        err = Object.assign(new Error(`HTTP ${res.status}`), { retry: res.status === 429 || res.status >= 500 });
-      }
-    } catch (e) {
-      err = Object.assign(e, { retry: e.name === "TimeoutError" || e.name === "TypeError" });
-    }
-    if (!err.retry || i + 1 >= tries) throw err;
-    const delay = (err.slow ? 30_000 : 5_000) * 2 ** i;
-    console.log(`  ${err.message}, retrying in ${delay / 1000}s`);
-    await sleep(delay);
-  }
+function gql(query) {
+  return withRetry(async () => {
+    const res = await timedFetch(API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "User-Agent": "lammap (github.com/mlhollestelle/lammap)" },
+      body: JSON.stringify({ query }),
+    }, wait);
+    if (!res.ok) throw httpError(res);
+    const body = await res.json();
+    if (body.data) return body;
+    // The API answers a whole query with an error now and then, often for minutes at a time.
+    throw Object.assign(new Error(body.errors?.[0]?.message ?? "no data"), { retry: true, slow: true });
+  }, { delay: (err) => (err.slow ? 30_000 : 5_000) });
 }
 
 // "EV6 S26D1 m1470" -> "E6", "RV4 ..." -> "Rv. 4", "FV7874 ..." -> "Fv. 7874", "KV1012 ..." -> "Kv. 1012".
@@ -182,10 +152,8 @@ function toDays(point, nodes) {
     hours[dir].get(k).add(h);
   };
   for (const n of nodes) {
-    // "2026-10-16 23" in Norwegian time; on the autumn DST change both 02:00 hours land in the same slot.
-    const s = localHour.format(new Date(n.from));
-    const k = s.slice(0, 10).replace(/-/g, "");
-    const h = Number(s.slice(11, 13));
+    // Norwegian day and hour; on the autumn DST change both 02:00 hours land in the same slot.
+    const [k, h] = dayHour(new Date(n.from));
     add("all", k, h, n.total);
     for (const d of n.byDirection ?? []) {
       const dir = slotOf(d.heading ?? "");
@@ -203,20 +171,6 @@ function toDays(point, nodes) {
     if (!v[24]) for (const m of Object.values(maps)) m.delete(k);
   }
   return { maps, dirNames };
-}
-
-// ---------- merge ----------
-async function readJson(file) {
-  try { return JSON.parse(await readFile(file, "utf8")); }
-  catch (e) { if (e.code === "ENOENT") return null; throw e; }
-}
-
-// Fetched days replace stored ones; stored days the new fetch lacks are kept.
-function merge(stored = {}, fetched) {
-  const out = {};
-  for (const [k, v] of Object.entries(stored)) if (k >= OLDEST_KEPT) out[k] = v;
-  for (const [k, v] of fetched) if (k >= OLDEST_KEPT) out[k] = v;
-  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
 }
 
 // ---------- main ----------
@@ -258,8 +212,7 @@ async function main() {
       const file = path.join(dir, `${p.id}.json`);
       const stored = (await readJson(file)) ?? {};
       const { maps, dirNames } = toDays(p, nodes.get(p.id));
-      const data = { id: p.id };
-      for (const d of ["all", "d1", "d2"]) data[d] = merge(stored[d], maps[d]);
+      const data = { id: p.id, ...mergeDirs(stored, maps, OLDEST_KEPT) };
       fetched++;
       const dayKeys = Object.keys(data.all);
       if (!dayKeys.length) continue; // no complete day in the kept window
@@ -279,24 +232,13 @@ async function main() {
   // entry while they have data in the kept window.
   for (const [id, s] of previous) if (!list.has(id) && s.last >= OLDEST_KEPT) list.set(id, s);
   await writeFile(listFile, JSON.stringify([...list.values()]));
-  const byMode = [...list.values()].reduce((a, s) => ({ ...a, [s.mode]: (a[s.mode] ?? 0) + 1 }), {});
   const stop = stopped ? ", stopped at the time limit" : broken ? `, stopped after ${MAX_FAILED_BATCHES} failed batches in a row` : "";
   console.log(`Done: ${fetched} points fetched, ${failed.length} failed${stop}; ` +
-    `${list.size} points with data (${Object.entries(byMode).map(([m, n]) => `${n} ${m}`).join(", ")})`);
+    `${list.size} points with data (${countBy([...list.values()], "mode")})`);
   if (stopped) console.log(`::warning::Norway: stopped at the time limit, run again with skip_existing to continue`);
   if (broken) console.log(`::warning::Norway: the API kept failing, stopped; run again with skip_existing to continue`);
   if (broken || failed.length > points.length * 0.1) process.exit(1);
   if (failed.length) console.log(`::warning::${failed.length} Norwegian points failed: ${failed.join(", ")}`);
-}
-
-function parseArgs(argv) {
-  const out = {};
-  for (let i = 0; i < argv.length; i++) {
-    const m = argv[i].match(/^--([\w-]+)(?:=(.*))?$/);
-    if (!m) throw new Error(`Unknown argument: ${argv[i]}`);
-    out[m[1]] = m[2] ?? (argv[i + 1] === undefined || argv[i + 1].startsWith("--") ? true : argv[++i]);
-  }
-  return out;
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
