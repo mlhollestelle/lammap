@@ -17,6 +17,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { addDays, httpError, iso, localToday, parseArgs, timedFetch, withRetry } from "./lib.mjs";
 
 const API = "https://tie.digitraffic.fi/api/tms/v1";
 const HEADERS = { "Digitraffic-User": "lammap/ingest" };
@@ -31,36 +32,19 @@ const args = parseArgs(process.argv.slice(2));
 const DAYS = Number(args.days ?? 7);
 const OUT = args.out ?? "data";
 
-// ---------- dates (Finnish local date, since the raw files use Finnish days) ----------
-function helsinkiToday() {
-  const s = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Helsinki" }).format(new Date());
-  const [y, m, d] = s.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d));
-}
-function addDays(date, n) { return new Date(date.getTime() + n * 86400000); }
-function iso(date) { return date.toISOString().slice(0, 10); }
 function dayOfYear(date) { return Math.round((date - Date.UTC(date.getUTCFullYear(), 0, 1)) / 86400000) + 1; }
 
 // ---------- fetch ----------
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 // Returns the file's text, or null when Digitraffic has no file for that station and day
 // (the CDN answers 403 or 404).
-async function fetchRaw(tms, date, tries = 4) {
+function fetchRaw(tms, date) {
   const url = `${API}/history/raw/lamraw_${tms}_${date.getUTCFullYear() % 100}_${dayOfYear(date)}.csv`;
-  for (let i = 0; ; i++) {
-    let err;
-    try {
-      const res = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(120_000) });
-      if (res.ok) return await res.text();
-      if (res.status === 403 || res.status === 404) return null;
-      err = Object.assign(new Error(`HTTP ${res.status}`), { retry: res.status === 429 || res.status >= 500 });
-    } catch (e) {
-      err = Object.assign(e, { retry: e.name === "TimeoutError" || e.name === "TypeError" });
-    }
-    if (!err.retry || i + 1 >= tries) throw err;
-    await sleep(5_000 * 2 ** i);
-  }
+  return withRetry(async () => {
+    const res = await timedFetch(url, { headers: HEADERS });
+    if (res.ok) return res.text();
+    if (res.status === 403 || res.status === 404) return null;
+    throw httpError(res);
+  });
 }
 
 // Fields: station; year; day; hour; minute; second; 1/100 s; length; lane; direction; class;
@@ -114,7 +98,7 @@ async function main() {
     tmsList = (await res.json()).features.map((f) => f.properties.tmsNumber);
   }
   const existing = await readExisting(args.existing);
-  const end = addDays(helsinkiToday(), -1);
+  const end = addDays(localToday("Europe/Helsinki"), -1); // the raw files use Finnish days
   const dates = Array.from({ length: DAYS }, (_, i) => addDays(end, -i));
 
   const jobs = [];
@@ -151,16 +135,6 @@ async function main() {
   console.log(`Done: ${written} written, ${absent} not published, ${failed.length} failed`);
   if (failed.length) console.log(`::warning::${failed.length} station-days failed: ${failed.slice(0, 50).join(", ")}`);
   if (failed.length > (written + failed.length) * 0.1) process.exit(1);
-}
-
-function parseArgs(argv) {
-  const out = {};
-  for (let i = 0; i < argv.length; i++) {
-    const m = argv[i].match(/^--([\w-]+)(?:=(.*))?$/);
-    if (!m) throw new Error(`Unknown argument: ${argv[i]}`);
-    out[m[1]] = m[2] ?? (argv[i + 1] === undefined || argv[i + 1].startsWith("--") ? true : argv[++i]);
-  }
-  return out;
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

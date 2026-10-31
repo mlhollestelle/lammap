@@ -12,8 +12,9 @@
 //   <out>/meta.json            { updated, end, keep }
 
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { dateWindow, httpError, iso, key, mergeDirs, parseArgs, readJson, throttle, timedFetch, withRetry } from "./lib.mjs";
 
 const API = "https://tie.digitraffic.fi/api/tms/v1";
 // Digitraffic throttles per IP, and allows more requests when this header is set
@@ -29,43 +30,18 @@ const KEEP = Number(args.keep ?? 366);  // how many days to keep per station
 const OUT = args.out ?? "data";
 const SKIP_EXISTING = Boolean(args["skip-existing"]);
 
-// ---------- dates (Finnish local date, since the reports use Finnish days) ----------
-function helsinkiToday() {
-  const s = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Helsinki" }).format(new Date());
-  const [y, m, d] = s.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d));
-}
-function addDays(date, n) { return new Date(date.getTime() + n * 86400000); }
-function iso(date) { return date.toISOString().slice(0, 10); }
-function key(date) { return iso(date).replace(/-/g, ""); }
-
-const END = addDays(helsinkiToday(), -1);
-const START = addDays(END, -(DAYS - 1));
-const OLDEST_KEPT = key(addDays(END, -(KEEP - 1)));
+// Finnish local days, since the reports use Finnish days.
+const { END, START, OLDEST_KEPT } = dateWindow("Europe/Helsinki", DAYS, KEEP);
 
 // ---------- fetch ----------
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-let lastRequest = 0;
-async function fetchRetry(url, tries = 4) {
-  for (let i = 0; ; i++) {
-    const gap = lastRequest + MIN_GAP_MS - Date.now();
-    if (gap > 0) await sleep(gap);
-    lastRequest = Date.now();
-    let err;
-    try {
-      const res = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(120_000) });
-      if (res.ok) return res;
-      err = Object.assign(new Error(`HTTP ${res.status}`), { status: res.status, retry: res.status === 429 || res.status >= 500 });
-    } catch (e) {
-      err = Object.assign(e, { retry: e.name === "TimeoutError" || e.name === "TypeError" });
-    }
-    if (!err.retry || i + 1 >= tries) throw err;
-    // Throttled: wait 1, 2, 4 minutes. Other transient errors: 5, 10, 20 seconds.
-    const delay = (err.status === 429 ? 60_000 : 5_000) * 2 ** i;
-    console.log(`  ${err.message}, retrying in ${delay / 1000}s`);
-    await sleep(delay);
-  }
+const wait = throttle(MIN_GAP_MS);
+// Throttled: wait 1, 2, 4 minutes. Other transient errors: 5, 10, 20 seconds.
+function fetchRetry(url, read) {
+  return withRetry(async () => {
+    const res = await timedFetch(url, { headers: HEADERS }, wait);
+    if (!res.ok) throw httpError(res);
+    return read(res);
+  }, { delay: (err) => (err.status === 429 ? 60_000 : 5_000) });
 }
 
 function historyUrl(tms) {
@@ -122,27 +98,11 @@ function parseReport(text) {
   return maps;
 }
 
-// ---------- merge ----------
-async function readJson(file) {
-  try { return JSON.parse(await readFile(file, "utf8")); }
-  catch (e) { if (e.code === "ENOENT") return null; throw e; }
-}
-
-// Fetched days replace stored ones; stored days the new report lacks are kept.
-function merge(stored = {}, fetched) {
-  const out = {};
-  for (const [k, v] of Object.entries(stored)) if (k >= OLDEST_KEPT) out[k] = v;
-  for (const [k, v] of fetched) if (k >= OLDEST_KEPT) out[k] = v;
-  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
-}
-
 async function ingestStation(tms) {
-  const res = await fetchRetry(historyUrl(tms));
-  const report = parseReport(await res.text());
+  const report = parseReport(await fetchRetry(historyUrl(tms), (res) => res.text()));
   const file = path.join(OUT, "stations", `${tms}.json`);
   const stored = (await readJson(file)) ?? {};
-  const data = { tms };
-  for (const dir of ["all", "d1", "d2"]) data[dir] = merge(stored[dir], report[dir]);
+  const data = { tms, ...mergeDirs(stored, report, OLDEST_KEPT) };
   // Written even when empty, so the map never requests a missing file.
   await writeFile(file, JSON.stringify(data));
   return report.d1.size + report.d2.size + report.all.size;
@@ -154,8 +114,7 @@ async function main() {
   if (args.stations) {
     tmsList = String(args.stations).split(",").map(Number);
   } else {
-    const res = await fetchRetry(`${API}/stations`);
-    tmsList = (await res.json()).features.map((f) => f.properties.tmsNumber);
+    tmsList = (await fetchRetry(`${API}/stations`, (res) => res.json())).features.map((f) => f.properties.tmsNumber);
   }
   await mkdir(path.join(OUT, "stations"), { recursive: true });
   console.log(`Fetching ${iso(START)} – ${iso(END)} for ${tmsList.length} stations, keeping ${KEEP} days`);
@@ -189,17 +148,6 @@ async function main() {
   await writeFile(path.join(OUT, "meta.json"), JSON.stringify({ updated: new Date().toISOString(), end: key(END), keep: KEEP }));
   // Shows up as an annotation on the Actions run; the next daily run refetches these days anyway.
   if (failed.length) console.log(`::warning::${failed.length} stations failed: ${failed.join(", ")}`);
-}
-
-function parseArgs(argv) {
-  const out = {};
-  for (let i = 0; i < argv.length; i++) {
-    const m = argv[i].match(/^--([\w-]+)(?:=(.*))?$/);
-    if (!m) throw new Error(`Unknown argument: ${argv[i]}`);
-    // A flag without a value (e.g. --skip-existing) is true.
-    out[m[1]] = m[2] ?? (argv[i + 1] === undefined || argv[i + 1].startsWith("--") ? true : argv[++i]);
-  }
-  return out;
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
