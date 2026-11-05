@@ -751,6 +751,9 @@ const FEATURES_EN = {
   "Liikenne ruuhkautuu": "Congestion",
   "Liikenne saattaa ruuhkautua": "Congestion possible",
   "Liikenne on jonoutunut": "Queues",
+  "Huono ajokeli": "Poor driving conditions",
+  "Erittäin huono ajokeli": "Very poor driving conditions",
+  "Liukas tie": "Slippery road",
 };
 
 // A circle marker drawn as a triangle on the canvas renderer; clicks still hit its circle.
@@ -774,9 +777,15 @@ function lineMiddle(geometry) {
   return L.latLng(lat, lon);
 }
 
+// Some messages cover a region rather than a road, like a weather warning for half the country, sent
+// as a (Multi)Polygon. Filled like a road they paint the whole map, so they get a dashed outline only,
+// can't be clicked across their area, and carry their triangle in the middle instead.
+const isArea = (layer) => layer instanceof L.Polygon;
+
 // Lines get the message colour; points are dots (or triangles) with a ring, so they read apart from the counters.
 function eventStyle(ev, layer) {
   const point = layer instanceof L.CircleMarker;
+  if (isArea(layer)) return { color: css(ev.color), weight: 1.5, opacity: 0.7, dashArray: "6 6", fill: false, interactive: false, smoothFactor: 3 };
   return {
     color: point ? css("--surface") : css(ev.color),
     weight: point ? 2 : 4,
@@ -824,6 +833,7 @@ async function loadEvents(k) {
     const extra = [];
     const bind = (f, layer) => {
       layer.setStyle(eventStyle(ev, layer));
+      if (isArea(layer)) return;
       layer.bindTooltip(escapeHtml(eventHeading(f.properties)), { sticky: true });
       layer.bindPopup(() => eventPopup(ev, f.properties), { maxWidth: 320 });
     };
@@ -832,9 +842,10 @@ async function loadEvents(k) {
       pointToLayer: (f, latlng) => marker(latlng),
       onEachFeature: (f, layer) => {
         bind(f, layer);
-        // Disruptions along a road also get a triangle, so they show at country scale too.
+        // Disruptions along a road also get a triangle, so they show at country scale too; areas get
+        // theirs in the middle, as the only clickable part.
         if (ev.marker === "triangle" && layer instanceof L.Polyline) {
-          const t = marker(lineMiddle(f.geometry));
+          const t = marker(isArea(layer) ? layer.getBounds().getCenter() : lineMiddle(f.geometry));
           bind(f, t);
           extra.push(t);
         }
@@ -862,7 +873,9 @@ function eventHeading(p) {
   const pt = a.locationDetails?.roadAddressLocation?.primaryPoint;
   const road = pt?.roadAddress?.road;
   const name = [pt?.roadName, road && (pt.roadName ? `road ${road}` : `Road ${road}`)].filter(Boolean).join(", ");
-  return name ? [name, pt.municipality].filter(Boolean).join(" · ") : a.title.split(". ")[0];
+  if (name) return [name, pt.municipality].filter(Boolean).join(" · ");
+  // Area messages have no road; their location reads like "Maan keskiosa, Maan pohjoisosa".
+  return p.announcements[0].location?.description?.split("\n")[0] || a.title.split(". ")[0];
 }
 
 const timeFmt = new Intl.DateTimeFormat("en-GB", {
@@ -889,13 +902,15 @@ function eventPopup(ev, p) {
   const type = p.situationType === "road work" ? "Roadwork" : ANNOUNCEMENT_TYPES[p.trafficAnnouncementType] ?? "Traffic announcement";
   const features = [...new Set(a.features.map(featureText))];
   const works = [...new Set(a.roadWorkPhases.flatMap((ph) => ph.workTypes ?? []).map((w) => w.type).filter((t) => t && t !== "other"))];
-  const where = escapeHtml(a.location?.description ?? "").replace(/\n/g, "<br>");
+  const heading = eventHeading(p);
+  const where = a.location?.description === heading ? "" : escapeHtml(a.location?.description ?? "").replace(/\n/g, "<br>");
   return `<div class="ev">
     <div class="label" style="color:var(${ev.color})">${type}</div>
-    <h4>${escapeHtml(eventHeading(p))}</h4>
+    <h4>${escapeHtml(heading)}</h4>
     <div class="when">${escapeHtml(eventWhen(a.timeAndDuration))}</div>
     ${features.length ? `<ul>${features.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>` : ""}
     ${works.length ? `<p>Work: ${escapeHtml(works.join(", "))}</p>` : ""}
+    ${a.comment ? `<p lang="fi">${escapeHtml(a.comment)}</p>` : ""}
     ${where ? `<p class="muted" lang="fi">${where}</p>` : ""}
     <div class="foot">${escapeHtml(a.sender ?? "Fintraffic")} · <a href="https://liikennetilanne.fintraffic.fi/" target="_blank" rel="noopener">Fintraffic traffic situation</a></div>
   </div>`;
