@@ -26,10 +26,12 @@ import path from "node:path";
 import { addDays, countBy, fromKey, httpError, iso, key, localToday, mergeDirs, parseArgs, readJson, throttle, timedFetch, withRetry } from "./lib.mjs";
 
 const API = "https://webtris.nationalhighways.co.uk/api/v1.0";
-const MIN_GAP_MS = 500;
+const MIN_GAP_MS = 300;
 // The API refuses more than about 30 sites per request, and pages at most 40,000 rows (15-minute intervals).
 const BATCH_SITES = 30;
 const PAGE = 40000;
+// Requests at a time: the API answers three about as fast as one.
+const PARALLEL = 3;
 const MAX_FAILED_BATCHES = 3;
 // Carriageways of one road are mostly 20 to 50 metres apart.
 const MAX_PAIR_M = 80;
@@ -299,18 +301,21 @@ async function main() {
   const list = new Map();
   const failed = [];
   let fetched = 0, batchNo = 0, stopped = false, failedInRow = 0, broken = false;
-  outer:
-  for (const [fromK, group] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
-    const start = fromKey(fromK);
-    for (const batch of batches(group)) {
-      if (Date.now() > DEADLINE) { stopped = true; break outer; }
+  // All batches, oldest window first, fetched PARALLEL at a time.
+  const queue = [...groups].sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([fromK, group]) => batches(group).map((batch) => ({ fromK, batch })));
+  async function worker() {
+    while (queue.length && !stopped && !broken) {
+      if (Date.now() > DEADLINE) { stopped = true; break; }
+      const { fromK, batch } = queue.shift();
       let acc;
       try {
-        acc = await fetchBatch(batch, start, END);
+        acc = await fetchBatch(batch, fromKey(fromK), END);
       } catch (e) {
         console.error(`Batch from ${fromK} (${batch.map((s) => s.id).join(",")}): ${e.message}`);
         failed.push(...batch.map((s) => s.id));
-        if (++failedInRow >= MAX_FAILED_BATCHES) { broken = true; break outer; }
+        // Batches failing even after the retries mean the API is down; the rest waits for the next run.
+        if (++failedInRow >= MAX_FAILED_BATCHES) broken = true;
         continue;
       }
       failedInRow = 0;
@@ -334,9 +339,10 @@ async function main() {
         }
         list.set(st.id, entry);
       }
-      if (++batchNo % 10 === 0) console.log(`  ${fetched} of ${todo} stations`);
+      if (++batchNo % 20 === 0) console.log(`  ${fetched} of ${todo} stations`);
     }
   }
+  await Promise.all(Array.from({ length: PARALLEL }, worker));
   // Stations not fetched this time (up to date, failed or past the deadline) keep their entry.
   for (const [id, s] of previous) if (!list.has(id)) list.set(id, s);
   // Stations without a complete day in the kept window stay in the list without "last", so they aren't
