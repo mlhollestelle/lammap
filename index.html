@@ -438,7 +438,9 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
 
 // The map shows one country at a time, picked in the header and kept in the URL (?country=no). Finland
 // has Digitraffic's live layers (traffic messages, traffic state, vehicle pulse, lane data); Norway has
-// Statens vegvesen's counters (scripts/ingest-nor.mjs), which only publish hourly volumes.
+// Statens vegvesen's counters (scripts/ingest-nor.mjs), which only publish hourly volumes; England has
+// National Highways' counters (scripts/ingest-eng.mjs), which are published a month at a time
+// ("monthly"), so its window ends at the newest day in its data rather than yesterday.
 const COUNTRIES = {
   fi: {
     name: "Finland", adjective: "Finnish", tz: "Europe/Helsinki", view: [[64.5, 26], 5], live: true,
@@ -450,11 +452,17 @@ const COUNTRIES = {
     attribution: '<a href="https://trafikkdata.atlas.vegvesen.no/">Statens vegvesen</a>, NLOD',
     intro: "Statens vegvesen's motor vehicle and bicycle counters across Norway",
   },
+  eng: {
+    name: "England", adjective: "UK", tz: "Europe/London", view: [[52.9, -1.6], 6], live: false, monthly: true,
+    attribution: '<a href="https://webtris.nationalhighways.co.uk/">National Highways WebTRIS</a>, <a href="https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/">OGL v3.0</a>',
+    intro: "National Highways' traffic counters on England's motorways and major A-roads. These are published a month at a time, so the newest data is weeks or months old",
+  },
 };
 const COUNTRY_ID = (() => {
   const c = new URLSearchParams(location.search).get("country");
   if (c in COUNTRIES) return c;
-  return location.hash.startsWith("#nor-") ? "no" : "fi"; // a station link without the parameter
+  // a station link without the parameter
+  return location.hash.startsWith("#nor-") ? "no" : location.hash.startsWith("#eng-") ? "eng" : "fi";
 })();
 const COUNTRY = COUNTRIES[COUNTRY_ID];
 {
@@ -494,13 +502,17 @@ const OULU_API = "https://wp.oulunliikenne.fi/avoin-data/pyorailykavely/graphql-
 const ECO_PAGE = "https://data.eco-counter.com/ParcPublic/?id=";
 // Statens vegvesen's traffic data, linked from the Norwegian counters.
 const NOR_PAGE = "https://trafikkdata.atlas.vegvesen.no/";
+// National Highways' WebTRIS, linked from the English counters.
+const ENG_PAGE = "https://webtris.nationalhighways.co.uk/";
 // Counters outside Digitraffic, by station kind (also the bucket folder of their files), with the
-// country they are shown in. Eco-Counter and Norwegian stations name their own municipality.
+// country they are shown in. Eco-Counter and Norwegian stations name their own municipality; the
+// English ones have none.
 const CITIES = {
   hel: { country: "fi", name: "Helsinki", count: "City of Helsinki counters" },
   oulu: { country: "fi", name: "Oulu", count: "Oulu counters" },
   eco: { country: "fi", name: null, count: "Eco-Counter counters" },
   nor: { country: "no", name: null, count: "Statens vegvesen counters" },
+  eng: { country: "eng", name: null, count: "National Highways counters" },
 };
 // What a station counts. Digitraffic's LAM stations count motor vehicles.
 const MODES = {
@@ -532,8 +544,8 @@ function iso(date) { return date.toISOString().slice(0, 10); }
 function key(date) { return iso(date).replace(/-/g, ""); }
 function fromKey(k) { return new Date(Date.UTC(+k.slice(0, 4), +k.slice(4, 6) - 1, +k.slice(6, 8))); }
 
-// The selected window ends at the newest day in the data (from meta.json), or yesterday
-// if that can't be loaded. "days" is the selected window length, kept when switching station.
+// The selected window ends at the newest day in the data (from meta.json, or the stations' newest day
+// for a country published monthly), or yesterday if that can't be loaded. "days" is the selected window length, kept when switching station.
 let END = addDays(localToday(), -1);
 let updated = null;
 let days = RANGES[0];
@@ -605,7 +617,7 @@ function prettyName(name) { return name.replace(/_/g, " "); }
 function displayName(st) { return st.kind === "hel" || st.kind === "eco" ? prettyName(st.name.replace(/^([\d.]+_|Formula : )/, "")) : prettyName(st.name); }
 function stationLabel(st) { return st.kind === "lam" ? `${st.tms} · ${displayName(st)}` : `${displayName(st)} · ${st.city ?? CITIES[st.kind].name ?? COUNTRY.name}`; }
 // Road counters are spread out; city counters sit close together.
-function zoomTo(st) { return st.kind === "lam" || st.kind === "nor" ? 11 : 13; }
+function zoomTo(st) { return st.kind === "lam" || st.kind === "nor" || st.kind === "eng" ? 11 : 13; }
 
 // City counters that stopped reporting more than this many days before the newest data are grey.
 const CITY_STALE_DAYS = 7;
@@ -614,7 +626,8 @@ async function loadCityStations(kind) {
   try {
     const res = await fetch(`${DATA}/${kind}/stations.json`);
     if (!res.ok) return [];
-    return (await res.json()).map((s) => ({
+    // English stations that never had a complete day are listed without "last", so they aren't fetched again.
+    return (await res.json()).filter((s) => s.last).map((s) => ({
       kind,
       key: `${kind}-${s.id}`,
       id: s.id,
@@ -625,6 +638,8 @@ async function loadCityStations(kind) {
       org: s.org,
       mode: s.mode,
       dirs: s.dirs,
+      oneWay: s.oneWay,
+      sites: s.sites,
       last: s.last,
       lat: s.lat,
       lon: s.lon,
@@ -680,6 +695,7 @@ async function loadStations() {
     const kinds = Object.keys(CITIES).filter((k) => CITIES[k].country === COUNTRY_ID);
     const [lam, cityLists] = await Promise.all([loadLam(), Promise.all(kinds.map(loadCityStations)), loadMeta()]);
     const cities = cityLists.flat();
+    if (COUNTRY.monthly && cities.length) END = fromKey(cities.reduce((a, s) => (s.last > a ? s.last : a), ""));
     const stale = key(addDays(END, -CITY_STALE_DAYS));
     for (const st of cities) st.inactive = st.last < stale;
     stations = [...lam, ...cities];
@@ -698,11 +714,11 @@ async function loadStations() {
         const n = cities.filter((s) => s.kind === k).length;
         return n ? `${n} ${CITIES[k].count}` : "";
       }),
-    ].filter(Boolean).join(", ") || "No counters loaded yet";
+    ].filter(Boolean).join(", ") + (COUNTRY.monthly && cities.length ? `, data up to ${fmtDate(END)}` : "") || "No counters loaded yet";
     renderModes();
     const fromHash = decodeURIComponent(location.hash.slice(1));
     const initial = stations.find((s) => s.key === fromHash);
-    if (initial) { selectStation(initial); map.setView([initial.lat, initial.lon], initial.kind === "lam" || initial.kind === "nor" ? 10 : 13); }
+    if (initial) { selectStation(initial); map.setView([initial.lat, initial.lon], zoomTo(initial) === 11 ? 10 : 13); }
   } catch (e) {
     document.getElementById("stationCount").innerHTML =
       `<span class="error">Could not load stations (${e.message}).</span> <button onclick="location.reload()">Retry</button>`;
@@ -1130,7 +1146,7 @@ const cache = new Map();
 // long windows, which would pass the API's page limit) sums from the City of Helsinki's API. Oulu's API
 // has no CSV, nor do Eco-Counter's pages.
 function historyUrl(st) {
-  if (st.kind === "oulu" || st.kind === "eco" || st.kind === "nor") return null;
+  if (st.kind === "oulu" || st.kind === "eco" || st.kind === "nor" || st.kind === "eng") return null;
   if (st.kind === "hel") {
     const p = new URLSearchParams({
       counter: String(st.id),
@@ -1238,7 +1254,8 @@ function headHtml(st) {
     : { hel: `City of Helsinki ${MODES[st.mode].noun} · ${escapeHtml(st.source)}`,
         oulu: `${escapeHtml(st.source)} ${MODES[st.mode].noun}`,
         eco: `${escapeHtml(st.city)} ${MODES[st.mode].noun} · Eco-Counter`,
-        nor: `${escapeHtml(st.source)} ${MODES[st.mode].noun} · ${[st.road, st.city].filter(Boolean).map(escapeHtml).join(", ")}` }[st.kind] +
+        nor: `${escapeHtml(st.source)} ${MODES[st.mode].noun} · ${[st.road, st.city].filter(Boolean).map(escapeHtml).join(", ")}`,
+        eng: `${escapeHtml(st.source)} ${MODES[st.mode].noun} · ${escapeHtml(st.road)}${st.oneWay ? ` · ${escapeHtml(st.oneWay.toLowerCase())} only` : ""}` }[st.kind] +
       (st.inactive ? ` · no data since ${fmtDate(fromKey(st.last))}` : "");
   return `
     <h2>${escapeHtml(displayName(st))}</h2>
@@ -1391,7 +1408,8 @@ function renderDetail(st, report, dirNames) {
         eco: `Source: the city's <a href="${ECO_PAGE}${st.org}">public Eco-Counter page</a>. Hourly sums of all channels, uncorrected; days with missing hours or no counts at all are left out.`,
         lam: `Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes).`,
         nor: `Source: <a href="${NOR_PAGE}">Statens vegvesen traffic data</a> (point ${escapeHtml(st.id)}), NLOD. Hourly volumes; days with a missing or partly covered hour are left out.`,
-      }[st.kind]} Updated daily${updated ? `, last on ${fmtDate(updated)}` : ""}.
+        eng: `Source: <a href="${ENG_PAGE}">National Highways WebTRIS</a> (site ${(st.sites ?? [st.id]).map(escapeHtml).join(" and ")}), OGL v3.0. 15-minute counts summed to hours; days with a missing interval${st.dirs ? " on either carriageway" : ""} are left out.`,
+      }[st.kind]} ${COUNTRY.monthly ? "Published a month at a time" : `Updated daily${updated ? `, last on ${fmtDate(updated)}` : ""}`}.
       ${historyUrl(st) ? `<a href="${historyUrl(st)}">Download CSV</a>` : ""}
     </div>`;
   detail.querySelectorAll("[data-dir]").forEach((b) => {

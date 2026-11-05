@@ -19,6 +19,9 @@ on:
       nor_minutes:
         description: Minutes the Norwegian counters may take (a full year needs about 6 hours over several runs)
         default: "60"
+      eng_minutes:
+        description: Minutes the English counters may take (a new month takes about 40 minutes, a full year several runs)
+        default: "60"
 
 permissions:
   contents: read
@@ -45,6 +48,7 @@ jobs:
       SKIP_EXISTING: ${{ inputs.skip_existing && '--skip-existing' || '' }}
       FD_DAYS: ${{ inputs.fd_days || '7' }}
       NOR_MINUTES: ${{ inputs.nor_minutes || '60' }}
+      ENG_MINUTES: ${{ inputs.eng_minutes || '60' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -59,6 +63,7 @@ jobs:
           aws s3 sync "$BUCKET/oulu" data/oulu --endpoint-url "$ENDPOINT" --only-show-errors
           aws s3 sync "$BUCKET/eco" data/eco --endpoint-url "$ENDPOINT" --only-show-errors
           aws s3 sync "$BUCKET/nor" data/nor --endpoint-url "$ENDPOINT" --only-show-errors
+          aws s3 sync "$BUCKET/eng" data/eng --endpoint-url "$ENDPOINT" --only-show-errors
 
       - name: Fetch new days from Digitraffic
         run: |
@@ -88,6 +93,15 @@ jobs:
         run: |
           [[ "$NOR_MINUTES" =~ ^[0-9]+$ ]] || { echo "nor_minutes must be a number"; exit 1; }
           node scripts/ingest-nor.mjs --days "$DAYS" $SKIP_EXISTING --max-minutes "$NOR_MINUTES"
+
+      # National Highways' counters in England (WebTRIS). They are published a month at a time, so most
+      # runs find nothing new; each station is fetched from where it was last fetched, so a run stopped
+      # after ENG_MINUTES continues on the next one without skip_existing.
+      - name: Fetch English counters
+        if: ${{ !cancelled() }}
+        run: |
+          [[ "$ENG_MINUTES" =~ ^[0-9]+$ ]] || { echo "eng_minutes must be a number"; exit 1; }
+          node scripts/ingest-eng.mjs --days "$DAYS" --max-minutes "$ENG_MINUTES"
 
       # Also after a failed fetch, so stations that did succeed are kept.
       - name: Upload to R2
