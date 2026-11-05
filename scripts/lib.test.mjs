@@ -83,3 +83,61 @@ test("withRetry retries transient errors and gives up on others", async () => {
   await assert.rejects(withRetry(async () => { calls++; throw new TypeError("fetch failed"); }, { tries: 2, delay: () => 1 }), /fetch failed/);
   assert.equal(calls, 2);
 });
+
+test("localHourCounts counts each local hour of a day", async () => {
+  const { localHourCounts } = await import("./lib.mjs");
+  const spring = localHourCounts("Europe/Zurich", "20260329");
+  assert.equal(spring[2], 0);
+  assert.equal(spring.reduce((a, b) => a + b), 23);
+  const autumn = localHourCounts("Europe/Zurich", "20261025");
+  assert.equal(autumn[2], 2);
+  assert.equal(autumn.reduce((a, b) => a + b), 25);
+  assert.deepEqual(localHourCounts("Europe/Zurich", "20260601"), Array(24).fill(1));
+});
+
+test("splitCsv handles quotes, empty fields and other separators", async () => {
+  const { splitCsv } = await import("./lib.mjs");
+  assert.deepEqual(splitCsv('"Z001","Seestrasse (A, B)",2683009.89,,"say ""hi"""'),
+    ["Z001", "Seestrasse (A, B)", "2683009.89", "", 'say "hi"']);
+  assert.deepEqual(splitCsv("a;b;;", ";"), ["a", "b", "", ""]);
+  assert.deepEqual(splitCsv('1;"x;y";2', ";"), ["1", "x;y", "2"]);
+});
+
+test("csvRows streams rows across chunk boundaries", async () => {
+  const { csvRows } = await import("./lib.mjs");
+  const enc = new TextEncoder();
+  const body = ["﻿a,b\r\n1,", "2\r\n3,4", "\r\n"].map((s) => enc.encode(s));
+  const rows = [];
+  for await (const r of csvRows(body)) rows.push(r);
+  assert.deepEqual(rows, [{ a: "1", b: "2" }, { a: "3", b: "4" }]);
+});
+
+test("lv95ToWgs84 is within a few metres", async () => {
+  const { lv95ToWgs84 } = await import("./lib.mjs");
+  // swisstopo's worked example: 2700000 / 1100000 is 46°02'38.87" N, 8°43'49.79" E.
+  const q = lv95ToWgs84(2700000, 1100000);
+  assert.ok(Math.abs(q.lat - 46.04413) < 0.00002 && Math.abs(q.lon - 8.73050) < 0.00002);
+});
+
+test("HourTally keeps complete days only", async () => {
+  const { HourTally } = await import("./lib.mjs");
+  const t = new HourTally();
+  for (let h = 0; h < 24; h++) {
+    t.add("a", "in", "20260601", h, 2);
+    t.add("a", "out", "20260601", h, 1);
+    t.add("a", "in", "20260602", h, 2);
+    // out misses an hour on the 2nd, and reports its count as missing on the 3rd
+    if (h !== 5) t.add("a", "out", "20260602", h, 1);
+    t.add("a", "in", "20260603", h, 2);
+    t.add("a", "out", "20260603", h, h === 7 ? null : 1);
+    // on the 4th only "in" has rows at all
+    t.add("a", "in", "20260604", h, 2);
+  }
+  const dirs = { d1: ["in"], d2: ["out"] };
+  const d = t.days("a", { timeZone: "Europe/Zurich", from: "20260601", to: "20260630", dirs });
+  assert.deepEqual([...d.all.keys()], ["20260601"]);
+  assert.equal(d.all.get("20260601")[24], 72);
+  assert.equal(d.d2.get("20260601")[24], 24);
+  // without directions, the 4th counts as a day of "in" only
+  assert.deepEqual([...t.days("a", { timeZone: "Europe/Zurich", from: "20260601", to: "20260630" }).all.keys()], ["20260601", "20260604"]);
+});

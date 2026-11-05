@@ -59,10 +59,10 @@ export function throttle(minGapMs) {
   };
 }
 
-// fetch with a timeout, after waiting for the throttle if there is one.
-export async function timedFetch(url, init = {}, wait) {
+// fetch with a timeout (which also covers reading the body), after waiting for the throttle if there is one.
+export async function timedFetch(url, init = {}, wait, timeoutMs = 120_000) {
   await wait?.();
-  return fetch(url, { ...init, signal: AbortSignal.timeout(120_000) });
+  return fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
 }
 
 export function httpError(res) {
@@ -132,4 +132,126 @@ export function onePerPlace(list) {
 export function countBy(list, field) {
   const n = list.reduce((a, s) => ({ ...a, [s[field]]: (a[s[field]] ?? 0) + 1 }), {});
   return Object.entries(n).map(([v, c]) => `${c} ${v}`).join(", ");
+}
+
+// ---------- local days ----------
+// How many times each hour 0..23 occurs on local day k (YYYYMMDD): 1, except 0 for 02 on the spring DST
+// day and 2 for 02 on the autumn one. A day is complete when it has a count for each occurrence.
+export function localHourCounts(timeZone, k) {
+  const dayHour = localDayHour(timeZone);
+  const counts = Array(24).fill(0);
+  const t0 = fromKey(k).getTime();
+  for (let t = t0 - 14 * 3600000; t < t0 + 38 * 3600000; t += 3600000) {
+    const [d, h] = dayHour(new Date(t));
+    if (d === k) counts[h]++;
+  }
+  return counts;
+}
+
+// ---------- CSV ----------
+// Splits a CSV line on sep, with fields optionally in double quotes ("" is a quote inside one).
+export function splitCsv(line, sep = ",") {
+  const out = [];
+  let i = 0;
+  while (i <= line.length) {
+    if (line[i] === '"') {
+      let s = "";
+      i++;
+      for (;;) {
+        const j = line.indexOf('"', i);
+        if (j < 0) { s += line.slice(i); i = line.length; break; }
+        s += line.slice(i, j);
+        if (line[j + 1] === '"') { s += '"'; i = j + 2; } else { i = j + 1; break; }
+      }
+      out.push(s);
+      i++; // the separator
+    } else {
+      const j = line.indexOf(sep, i);
+      const end = j < 0 ? line.length : j;
+      out.push(line.slice(i, end));
+      i = end + 1;
+    }
+  }
+  return out;
+}
+
+// Rows of a CSV response body as objects keyed by the header, streamed, so files of hundreds of MB
+// don't have to fit in memory. Fields with line breaks are not supported.
+export async function* csvRows(body, sep = ",") {
+  const decoder = new TextDecoder();
+  let rest = "", header = null;
+  const row = (line) => {
+    if (line.endsWith("\r")) line = line.slice(0, -1);
+    if (!line) return null;
+    const f = splitCsv(line, sep);
+    if (!header) { header = f.map((h) => h.replace(/^﻿/, "")); return null; }
+    return Object.fromEntries(header.map((h, i) => [h, f[i] ?? ""]));
+  };
+  for await (const chunk of body) {
+    rest += decoder.decode(chunk, { stream: true });
+    const lines = rest.split("\n");
+    rest = lines.pop();
+    for (const line of lines) { const r = row(line); if (r) yield r; }
+  }
+  rest += decoder.decode();
+  const r = row(rest);
+  if (r) yield r;
+}
+
+// ---------- coordinates ----------
+// Swiss LV95 (EPSG:2056) to WGS84, with swisstopo's approximate formulas (about 1 m off).
+export function lv95ToWgs84(e, n) {
+  const y = (e - 2600000) / 1e6, x = (n - 1200000) / 1e6;
+  const lon = 2.6779094 + 4.728982 * y + 0.791484 * y * x + 0.1306 * y * x * x - 0.0436 * y * y * y;
+  const lat = 16.9023892 + 3.238272 * x - 0.270978 * y * y - 0.002528 * x * x - 0.0447 * y * y * x - 0.014 * x * x * x;
+  return { lat: Math.round((lat * 100) / 36 * 1e6) / 1e6, lon: Math.round((lon * 100) / 36 * 1e6) / 1e6 };
+}
+
+// ---------- hourly tallies ----------
+// Counts per counter and slot (a measuring point, lane or direction) per local day and hour, with the
+// number of intervals each hour got, to tell which days are complete.
+export class HourTally {
+  constructor() { this.counters = new Map(); }
+  // A row for slot on day k, hour h. A null value is a row that says its count is missing: the slot is
+  // still expected that day.
+  add(counter, slot, k, h, value) {
+    let c = this.counters.get(counter);
+    if (!c) this.counters.set(counter, (c = new Map()));
+    let s = c.get(slot);
+    if (!s) c.set(slot, (s = new Map()));
+    let d = s.get(k);
+    if (!d) s.set(k, (d = { v: Array(24).fill(0), n: Array(24).fill(0) }));
+    if (value != null) { d.v[h] += value; d.n[h]++; }
+  }
+  // The complete days of a counter between from and to (YYYYMMDD) as { all, d1, d2 } Maps of
+  // YYYYMMDD -> [h00..h23, total]. A day is complete when every slot with a row that day has perHour
+  // intervals in each local hour. With dirs ({ d1: [slots], d2: [slots] }) both directions need a
+  // slot that day, and d1 and d2 sum their slots. Days with no counts at all are a stuck counter.
+  days(counter, { timeZone, perHour = 1, from, to, dirs }) {
+    const out = { all: new Map(), d1: new Map(), d2: new Map() };
+    const slots = this.counters.get(counter);
+    if (!slots) return out;
+    const keys = new Set();
+    for (const s of slots.values()) for (const k of s.keys()) if (k >= from && k <= to) keys.add(k);
+    for (const k of [...keys].sort()) {
+      const need = localHourCounts(timeZone, k).map((c) => c * perHour);
+      const present = [...slots].filter(([, s]) => s.has(k));
+      const complete = present.every(([, s]) => s.get(k).n.every((n, h) => n >= need[h]));
+      if (!complete) continue;
+      if (dirs && !["d1", "d2"].every((d) => dirs[d].some((slot) => slots.get(slot)?.has(k)))) continue;
+      const sum = (names) => {
+        const v = Array(25).fill(0);
+        for (const [name, s] of present) {
+          if (!names.includes(name)) continue;
+          s.get(k).v.forEach((x, h) => { v[h] += x; v[24] += x; });
+        }
+        return v;
+      };
+      const all = sum(present.map(([name]) => name));
+      if (!all[24]) continue;
+      out.all.set(k, all);
+      if (dirs) { out.d1.set(k, sum(dirs.d1)); out.d2.set(k, sum(dirs.d2)); }
+    }
+    return out;
+  }
 }

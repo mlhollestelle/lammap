@@ -64,6 +64,8 @@ jobs:
           aws s3 sync "$BUCKET/eco" data/eco --endpoint-url "$ENDPOINT" --only-show-errors
           aws s3 sync "$BUCKET/nor" data/nor --endpoint-url "$ENDPOINT" --only-show-errors
           aws s3 sync "$BUCKET/eng" data/eng --endpoint-url "$ENDPOINT" --only-show-errors
+          aws s3 sync "$BUCKET/zh" data/zh --endpoint-url "$ENDPOINT" --only-show-errors
+          aws s3 sync "$BUCKET/bs" data/bs --endpoint-url "$ENDPOINT" --only-show-errors
 
       - name: Fetch new days from Digitraffic
         run: |
@@ -85,6 +87,17 @@ jobs:
       - name: Fetch Eco-Counter counters
         if: ${{ !cancelled() }}
         run: node scripts/ingest-eco.mjs --days "$DAYS"
+
+      # The City of Zürich's car, cycle and pedestrian counters. Reads the whole of this year's CSV files
+      # (about 500 MB), which takes under a minute.
+      - name: Fetch Zürich counters
+        if: ${{ !cancelled() }}
+        run: node scripts/ingest-zh.mjs --days "$DAYS"
+
+      # Basel-Stadt's car, cycle and pedestrian counters.
+      - name: Fetch Basel counters
+        if: ${{ !cancelled() }}
+        run: node scripts/ingest-bs.mjs --days "$DAYS"
 
       # Statens vegvesen's car and bicycle counters in Norway. Stops after NOR_MINUTES; a backfill
       # continues where it stopped when run again with skip_existing.
