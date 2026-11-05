@@ -20,7 +20,7 @@ on:
         description: Minutes the Norwegian counters may take (a full year needs about 6 hours over several runs)
         default: "60"
       eng_minutes:
-        description: Minutes the English counters may take (a new month takes about 40 minutes, a full year several runs)
+        description: Minutes the English counters may take (a new month takes about 25 minutes, a full year about 5 hours over several runs)
         default: "60"
 
 permissions:
