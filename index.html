@@ -463,6 +463,33 @@ const COUNTRIES = {
     attribution: '<a href="https://data.stadt-zuerich.ch/">Stadt Zürich</a>, CC0; <a href="https://data.bs.ch/">Kanton Basel-Stadt</a>, CC BY 4.0; Köniz and Kriens via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
     intro: "the car, bicycle and pedestrian counters of the cities of Zürich and Basel, and the cycle counters of Köniz and Kriens. There is no national coverage yet: the federal roads office publishes no hourly counts as open data",
   },
+  // Countries with only the cycle and pedestrian counters of Eco-Counter's public pages
+  // (scripts/ingest-eco.mjs), each opening on where they are.
+  fr: {
+    name: "France", adjective: "French", tz: "Europe/Paris", view: [[45.8, 4.0], 6], live: false,
+    attribution: 'Métropole de Lyon, Hauts-de-Seine, Var and Annecy via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle and pedestrian counters of Grand Lyon, the Hauts-de-Seine, the Var and Annecy, from their public Eco-Counter pages. Paris's own counters are not included",
+  },
+  es: {
+    name: "Spain", adjective: "Spanish", tz: "Europe/Madrid", view: [[40.4, 0.8], 7], live: false,
+    attribution: 'Àrea Metropolitana de Barcelona, Sant Cugat and Benidorm via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle counters of the Barcelona metropolitan area, Sant Cugat and Benidorm, from their public Eco-Counter pages",
+  },
+  be: {
+    name: "Belgium", adjective: "Belgian", tz: "Europe/Brussels", view: [[50.85, 4.4], 8], live: false,
+    attribution: 'Fietsflow, Kortrijk and Liège via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle and pedestrian counters of Flanders (Fietsflow), Kortrijk and Liège, from their public Eco-Counter pages",
+  },
+  pl: {
+    name: "Poland", adjective: "Polish", tz: "Europe/Warsaw", view: [[51.3, 19.5], 6], live: false,
+    attribution: 'Poznań, Małopolska, Świętokrzyskie and Olsztyn via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle counters of Poznań, Olsztyn and the Małopolska and Świętokrzyskie regions, from their public Eco-Counter pages",
+  },
+  ee: {
+    name: "Estonia", adjective: "Estonian", tz: "Europe/Tallinn", view: [[58.8, 25.2], 7], live: false,
+    attribution: 'Tallinn, Tartu and Pärnu via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle and pedestrian counters of Tallinn, Tartu and Pärnu, from their public Eco-Counter pages",
+  },
 };
 const COUNTRY_ID = (() => {
   const c = new URLSearchParams(location.search).get("country");
@@ -516,13 +543,13 @@ const ZH_CARS = "https://data.stadt-zuerich.ch/dataset/sid_dav_verkehrszaehlung_
 const ZH_ECO = "https://data.stadt-zuerich.ch/dataset/ted_taz_verkehrszaehlungen_werte_fussgaenger_velo";
 const BS_PAGE = "https://data.bs.ch/explore/dataset/";
 // Counters outside Digitraffic, by station kind (also the bucket folder of their files), with the
-// country they are shown in. Eco-Counter's pages span countries ("countries"), and each of their
-// stations names its own (Finland when it doesn't). Eco-Counter and Norwegian stations name their own municipality; the
+// country they are shown in. Eco-Counter's pages span countries ("countries"), with a station list
+// per country ("list"). Eco-Counter and Norwegian stations name their own municipality; the
 // English ones have none.
 const CITIES = {
   hel: { country: "fi", name: "Helsinki", count: "City of Helsinki counters" },
   oulu: { country: "fi", name: "Oulu", count: "Oulu counters" },
-  eco: { country: "fi", countries: ["fi", "no", "ch"], name: null, count: "Eco-Counter counters" },
+  eco: { country: "fi", countries: ["fi", "no", "ch", "fr", "es", "be", "pl", "ee"], list: (c) => `stations-${c}.json`, name: null, count: "Eco-Counter counters" },
   nor: { country: "no", name: null, count: "Statens vegvesen counters" },
   eng: { country: "eng", name: null, count: "National Highways counters" },
   zh: { country: "ch", name: "Zürich", count: "Zürich counters" },
@@ -638,7 +665,7 @@ const CITY_STALE_DAYS = 7;
 
 async function loadCityStations(kind) {
   try {
-    const res = await fetch(`${DATA}/${kind}/stations.json`);
+    const res = await fetch(`${DATA}/${kind}/${CITIES[kind].list?.(COUNTRY_ID) ?? "stations.json"}`);
     if (!res.ok) return [];
     // English stations that never had a complete day are listed without "last", so they aren't fetched again.
     return (await res.json()).filter((s) => s.last && (s.country ?? CITIES[kind].country) === COUNTRY_ID).map((s) => ({
@@ -1421,7 +1448,7 @@ function renderDetail(st, report, dirNames) {
       ${{
         hel: `Source: City of Helsinki, <a href="${HEL_API}/">LIDO-TIKU API</a> (${escapeHtml(st.source)}), CC BY 4.0. Hourly sums, uncorrected; days cut short by an outage are left out.`,
         oulu: `Source: ${escapeHtml(st.source)} Eco-Counter via <a href="${OULU_API}">Oulunliikenne's GraphQL API</a>, CC BY 4.0. Hourly sums, uncorrected; days with missing hours are left out.`,
-        eco: `Source: the city's <a href="${ECO_PAGE}${st.org}">public Eco-Counter page</a>. Hourly sums of all channels, uncorrected; days with missing hours or no counts at all are left out.`,
+        eco: `Source: ${escapeHtml(st.city)}'s <a href="${ECO_PAGE}${st.org}">public Eco-Counter page</a>. Hourly sums of all channels, uncorrected; days with missing hours or no counts at all are left out.`,
         lam: `Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes).`,
         nor: `Source: <a href="${NOR_PAGE}">Statens vegvesen traffic data</a> (point ${escapeHtml(st.id)}), NLOD. Hourly volumes; days with a missing or partly covered hour are left out.`,
         eng: `Source: <a href="${ENG_PAGE}">National Highways WebTRIS</a> (site ${(st.sites ?? [st.id]).map(escapeHtml).join(" and ")}), OGL v3.0. 15-minute counts summed to hours; days with a missing interval${st.dirs ? " on either carriageway" : ""} are left out.`,

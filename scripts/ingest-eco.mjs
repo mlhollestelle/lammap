@@ -1,14 +1,21 @@
-// Fetches the cycle and pedestrian counters that cities in Finland, Norway and Switzerland publish on
-// Eco-Counter's public web pages (Eco-Visio's "publicwebpageplus" API, which the pages themselves use;
-// not documented by Eco-Counter). Hourly sums are merged into one JSON file per counter in the same format as
-// scripts/ingest.mjs, plus a station list. Run by .github/workflows/ingest.yml, which syncs the
-// output directory with the R2 bucket.
+// Fetches the cycle and pedestrian counters that cities and regions publish on Eco-Counter's public
+// web pages (Eco-Visio's "publicwebpageplus" API, which the pages themselves use; not documented by
+// Eco-Counter), in Finland, Norway, Switzerland, France, Spain, Belgium, Poland and Estonia. Hourly
+// sums are merged into one JSON file per counter in the same format as scripts/ingest.mjs, plus a
+// station list per country. Run by .github/workflows/ingest.yml, which syncs the output directory with
+// the R2 bucket.
 //
 //   node scripts/ingest-eco.mjs [--days 7] [--keep 366] [--out data] [--counters 100146346-bike,100059446-pedestrian]
+//                               [--countries fi,no] [--skip-existing] [--max-minutes 45]
 //
 // Output:
-//   <out>/eco/<counter>.json   { id, all }, a map YYYYMMDD -> [h00..h23, total]
-//   <out>/eco/stations.json    [{ id, name, city, org, mode, lat, lon, dirs, last, days }], counters with data
+//   <out>/eco/<counter>.json            { id, all }, a map YYYYMMDD -> [h00..h23, total]
+//   <out>/eco/stations-<country>.json   [{ id, name, city, country, org, mode, lat, lon, dirs, last, days, from }]
+//   <out>/eco/stations.json             the Finnish list again, for pages from before the split
+//
+// A full year for all of about 1,000 counters takes about an hour, so --max-minutes stops the run in
+// time and --skip-existing continues it: it skips counters already fetched from the start of the window
+// ("from" in the station list).
 //
 // A site that counts both cyclists and pedestrians becomes two counters, "<site>-bike" and
 // "<site>-pedestrian". The pages don't say which channels are directions and which are separate
@@ -61,6 +68,30 @@ const ORGS = [
   { id: 6777, city: "Ørland", country: "no" },
   { id: 7542, city: "Austevoll", country: "no" },
   { id: 4043, city: "Trøndelag", country: "no" }, // the county's counters, in several municipalities
+  // France. Grand Lyon names its sites "<commune>_<place>". The national page of the Réseau vélo et
+  // marche (891, about 2,000 counters) only serves data up to the end of 2025; Meurthe-et-Moselle's
+  // (5542) is a study of hiking trails, mostly ended.
+  { id: 3902, city: "Grand Lyon", country: "fr", cityFromName: true },
+  { id: 6062, city: "Hauts-de-Seine", country: "fr" },
+  { id: 236, city: "Var", country: "fr" },
+  { id: 873, city: "Annecy", country: "fr" },
+  // Spain
+  { id: 5568, city: "Barcelona area", country: "es" },
+  { id: 6840, city: "Sant Cugat", country: "es" },
+  { id: 6818, city: "Benidorm", country: "es" },
+  // Belgium; Fietsflow covers Flanders.
+  { id: 8910, city: "Flanders", country: "be" },
+  { id: 5872, city: "Kortrijk", country: "be" },
+  { id: 8698, city: "Liège", country: "be" },
+  // Poland
+  { id: 6113, city: "Poznań", country: "pl" },
+  { id: 6296, city: "Małopolska", country: "pl" },
+  { id: 8068, city: "Świętokrzyskie", country: "pl" },
+  { id: 8000, city: "Olsztyn", country: "pl" },
+  // Estonia
+  { id: 5327, city: "Tallinn", country: "ee" },
+  { id: 5736, city: "Tartu", country: "ee" },
+  { id: 6280, city: "Pärnu", country: "ee" },
 ];
 const SITE_CITY = {
   // Espoo
@@ -89,9 +120,17 @@ const args = parseArgs(process.argv.slice(2));
 const DAYS = Number(args.days ?? 7);
 const KEEP = Number(args.keep ?? 366);
 const OUT = args.out ?? "data";
+const SKIP_EXISTING = Boolean(args["skip-existing"]);
+const DEADLINE = args["max-minutes"] ? Date.now() + Number(args["max-minutes"]) * 60_000 : Infinity;
+const COUNTRIES = args.countries ? new Set(String(args.countries).split(",")) : null;
+// Requests in flight at once; the throttle still spaces their starts.
+const PARALLEL = 3;
 
 // Countries the map shows, with their time zone; the pages report the organisation's local days and hours.
-const TIME_ZONES = { fi: "Europe/Helsinki", ch: "Europe/Zurich", no: "Europe/Oslo" };
+const TIME_ZONES = {
+  fi: "Europe/Helsinki", no: "Europe/Oslo", ch: "Europe/Zurich", fr: "Europe/Paris", es: "Europe/Madrid",
+  be: "Europe/Brussels", pl: "Europe/Warsaw", ee: "Europe/Tallinn",
+};
 const NOR_API = "https://trafikkdata-api.atlas.vegvesen.no/";
 // The window in Finnish days. Elsewhere yesterday is the same day by the time the workflow runs, and
 // the local days are kept as the page reports them.
@@ -123,9 +162,11 @@ async function norwegianCycleCounters() {
 async function listCounters() {
   const hel = (await getJson(`${HEL_API}/counters/?${new URLSearchParams({ source: "EcoCounter", page_size: "1000" })}`))
     .results.features.map((f) => ({ name: f.properties.name.toLowerCase(), lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0] }));
-  const nor = await norwegianCycleCounters();
+  const orgs = ORGS.filter((o) => !COUNTRIES || COUNTRIES.has(o.country ?? "fi"));
+  const nor = orgs.some((o) => o.country === "no") ? await norwegianCycleCounters() : [];
   const out = [];
-  for (const org of ORGS) {
+  const seen = new Set();
+  for (const org of orgs) {
     for (const s of await getJson(`${API}/${org.id}?withNull=true`)) {
       if (SPARE.test(s.nom.trim())) continue;
       const city = SITE_CITY[s.idPdc] ?? org.city;
@@ -134,8 +175,13 @@ async function listCounters() {
         const flows = (s.pratique ?? []).filter((p) => String(p.pratique) === pratique).map((p) => p.id);
         if (!flows.length) continue;
         if (org.country === "no" && mode === "bike" && nor.some((p) => metres(p, s) < SAME_PLACE_M)) continue;
-        const name = s.nom.trim().replace(org.strip ?? /^$/, "");
-        out.push({ id: `${s.idPdc}-${mode}`, site: s.idPdc, name, city, country: org.country ?? "fi", org: org.id, mode, lat: s.lat, lon: s.lon, flows });
+        // A device on two pages (a city's and its region's) is fetched once.
+        if (seen.has(`${s.idPdc}-${mode}`)) continue;
+        seen.add(`${s.idPdc}-${mode}`);
+        let name = s.nom.trim().replace(org.strip ?? /^$/, ""), place = city;
+        const m = org.cityFromName && name.match(/^([^_]+)_(.+)$/);
+        if (m) [place, name] = [m[1].trim(), m[2].trim()];
+        out.push({ id: `${s.idPdc}-${mode}`, site: s.idPdc, name, city: place, country: org.country ?? "fi", org: org.id, mode, lat: s.lat, lon: s.lon, flows });
       }
     }
   }
@@ -187,38 +233,62 @@ function toDays(rows, timeZone) {
 async function main() {
   const dir = path.join(OUT, "eco");
   await mkdir(dir, { recursive: true });
-  const listFile = path.join(dir, "stations.json");
-  const previous = new Map(((await readJson(listFile)) ?? []).map((s) => [s.id, s]));
+  const countries = Object.keys(TIME_ZONES);
+  const listFile = (c) => path.join(dir, `stations-${c}.json`);
+  // The lists of the last run: one per country, or the single list from before the split.
+  const previous = new Map();
+  for (const s of (await readJson(path.join(dir, "stations.json"))) ?? []) previous.set(s.id, { country: "fi", ...s });
+  for (const c of countries) for (const s of (await readJson(listFile(c))) ?? []) previous.set(s.id, s);
+
   let counters = await listCounters();
   if (args.counters) {
     const wanted = new Set(String(args.counters).split(","));
     counters = counters.filter((c) => wanted.has(c.id));
   }
-  console.log(`Fetching ${iso(START)} – ${iso(END)} for ${counters.length} Eco-Counter counters, keeping ${KEEP} days`);
+  const skipped = SKIP_EXISTING ? counters.filter((c) => previous.get(c.id)?.from <= key(START)) : [];
+  counters = counters.filter((c) => !skipped.includes(c));
+  console.log(`Fetching ${iso(START)} – ${iso(END)} for ${counters.length} Eco-Counter counters (${skipped.length} skipped), keeping ${KEEP} days`);
 
-  const list = [];
+  const list = new Map();
   const failed = [];
-  for (const c of counters) {
-    try {
-      const file = path.join(dir, `${c.id}.json`);
-      const stored = (await readJson(file)) ?? {};
-      const data = { id: c.id, all: merge(stored.all, toDays(await fetchHours(c), TIME_ZONES[c.country]), OLDEST_KEPT) };
-      const dayKeys = Object.keys(data.all);
-      if (dayKeys.length < MIN_DAYS) continue;
-      await writeFile(file, JSON.stringify(data));
-      list.push({ id: c.id, name: c.name, city: c.city, country: c.country, org: c.org, mode: c.mode, lat: c.lat, lon: c.lon, dirs: null, last: dayKeys.at(-1), days: dayKeys.length });
-    } catch (e) {
-      failed.push(c.id);
-      console.error(`Counter ${c.id} ${c.name}: ${e.message}`);
-      // Keep it on the map with its stored data; the next run tries again.
-      if (previous.has(c.id)) list.push(previous.get(c.id));
+  let next = 0, done = 0, stopped = false;
+  async function worker() {
+    while (next < counters.length) {
+      if (Date.now() > DEADLINE) { stopped = true; return; }
+      const c = counters[next++];
+      try {
+        const file = path.join(dir, `${c.id}.json`);
+        const rows = await fetchHours(c);
+        const stored = (await readJson(file)) ?? {};
+        const data = { id: c.id, all: merge(stored.all, toDays(rows, TIME_ZONES[c.country]), OLDEST_KEPT) };
+        const dayKeys = Object.keys(data.all);
+        if (dayKeys.length >= MIN_DAYS) {
+          await writeFile(file, JSON.stringify(data));
+          const prevFrom = previous.get(c.id)?.from;
+          list.set(c.id, {
+            id: c.id, name: c.name, city: c.city, country: c.country, org: c.org, mode: c.mode, lat: c.lat, lon: c.lon,
+            dirs: null, last: dayKeys.at(-1), days: dayKeys.length, from: prevFrom && prevFrom < key(START) ? prevFrom : key(START),
+          });
+        }
+      } catch (e) {
+        failed.push(c.id);
+        console.error(`Counter ${c.id} ${c.name}: ${e.message}`);
+      }
+      if (++done % 100 === 0) console.log(`  ${done} of ${counters.length} counters`);
     }
   }
+  await Promise.all(Array.from({ length: PARALLEL }, worker));
+  // Counters not fetched this time (skipped, failed or past the deadline) keep their entry while they
+  // have data in the kept window.
+  for (const [id, s] of previous) if (!list.has(id) && s.last >= OLDEST_KEPT) list.set(id, s);
   // Some sites are listed twice at the same position (e.g. two "Wolffintie" in Vaasa). Only the one
   // with the most days goes on the map.
-  const shown = onePerPlace(list);
-  await writeFile(listFile, JSON.stringify(shown));
-  console.log(`Done: ${shown.length} counters with data (${countBy(shown, "city")}), ${failed.length} failed`);
+  const shown = onePerPlace([...list.values()]);
+  for (const c of countries) await writeFile(listFile(c), JSON.stringify(shown.filter((s) => s.country === c)));
+  await writeFile(path.join(dir, "stations.json"), JSON.stringify(shown.filter((s) => s.country === "fi")));
+  const stop = stopped ? ", stopped at the time limit" : "";
+  console.log(`Done: ${shown.length} counters with data (${countBy(shown, "country")}), ${failed.length} failed${stop}`);
+  if (stopped) console.log("::warning::Eco-Counter: stopped at the time limit, run again with skip_existing to continue");
   if (failed.length > counters.length * 0.1) process.exit(1);
   if (failed.length) console.log(`::warning::${failed.length} Eco-Counter counters failed: ${failed.join(", ")}`);
 }
