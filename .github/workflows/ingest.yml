@@ -19,6 +19,9 @@ on:
       nor_minutes:
         description: Minutes the Norwegian counters may take (a full year needs about 6 hours over several runs)
         default: "60"
+      eco_minutes:
+        description: Minutes the Eco-Counter counters may take (a full year takes about 45 minutes)
+        default: "50"
       eng_minutes:
         description: Minutes the English counters may take (a new month takes about 25 minutes, a full year about 5 hours over several runs)
         default: "60"
@@ -49,6 +52,7 @@ jobs:
       FD_DAYS: ${{ inputs.fd_days || '7' }}
       NOR_MINUTES: ${{ inputs.nor_minutes || '60' }}
       ENG_MINUTES: ${{ inputs.eng_minutes || '60' }}
+      ECO_MINUTES: ${{ inputs.eco_minutes || '50' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -64,6 +68,8 @@ jobs:
           aws s3 sync "$BUCKET/eco" data/eco --endpoint-url "$ENDPOINT" --only-show-errors
           aws s3 sync "$BUCKET/nor" data/nor --endpoint-url "$ENDPOINT" --only-show-errors
           aws s3 sync "$BUCKET/eng" data/eng --endpoint-url "$ENDPOINT" --only-show-errors
+          aws s3 sync "$BUCKET/zh" data/zh --endpoint-url "$ENDPOINT" --only-show-errors
+          aws s3 sync "$BUCKET/bs" data/bs --endpoint-url "$ENDPOINT" --only-show-errors
 
       - name: Fetch new days from Digitraffic
         run: |
@@ -81,10 +87,26 @@ jobs:
         if: ${{ !cancelled() }}
         run: node scripts/ingest-oulu.mjs --days "$DAYS"
 
-      # Cycle and pedestrian counters on Eco-Counter's public pages: Espoo, Vantaa, Lahti, Joensuu and others.
+      # Cycle and pedestrian counters on Eco-Counter's public pages: Espoo, Vantaa, Lahti, Joensuu and
+      # others in Finland, Oslo, Bergen, Trondheim and others in Norway, Köniz and Kriens in Switzerland,
+      # and the ten countries that only have these (France, Spain, Sweden, Italy and others). Stops after
+      # ECO_MINUTES; a backfill continues where it stopped when run again with skip_existing.
       - name: Fetch Eco-Counter counters
         if: ${{ !cancelled() }}
-        run: node scripts/ingest-eco.mjs --days "$DAYS"
+        run: |
+          [[ "$ECO_MINUTES" =~ ^[0-9]+$ ]] || { echo "eco_minutes must be a number"; exit 1; }
+          node scripts/ingest-eco.mjs --days "$DAYS" $SKIP_EXISTING --max-minutes "$ECO_MINUTES"
+
+      # The City of Zürich's car, cycle and pedestrian counters. Reads the whole of this year's CSV files
+      # (about 500 MB), which takes under a minute.
+      - name: Fetch Zürich counters
+        if: ${{ !cancelled() }}
+        run: node scripts/ingest-zh.mjs --days "$DAYS"
+
+      # Basel-Stadt's car, cycle and pedestrian counters.
+      - name: Fetch Basel counters
+        if: ${{ !cancelled() }}
+        run: node scripts/ingest-bs.mjs --days "$DAYS"
 
       # Statens vegvesen's car and bicycle counters in Norway. Stops after NOR_MINUTES; a backfill
       # continues where it stopped when run again with skip_existing.

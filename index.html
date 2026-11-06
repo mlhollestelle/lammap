@@ -440,7 +440,8 @@ try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark"
 // has Digitraffic's live layers (traffic messages, traffic state, vehicle pulse, lane data); Norway has
 // Statens vegvesen's counters (scripts/ingest-nor.mjs), which only publish hourly volumes; England has
 // National Highways' counters (scripts/ingest-eng.mjs), which are published a month at a time
-// ("monthly"), so its window ends at the newest day in its data rather than yesterday.
+// ("monthly"), so its window ends at the newest day in its data rather than yesterday. Switzerland has
+// the cities of Zürich and Basel (scripts/ingest-zh.mjs, scripts/ingest-bs.mjs), so it opens on them.
 const COUNTRIES = {
   fi: {
     name: "Finland", adjective: "Finnish", tz: "Europe/Helsinki", view: [[64.5, 26], 5], live: true,
@@ -449,20 +450,78 @@ const COUNTRIES = {
   },
   no: {
     name: "Norway", adjective: "Norwegian", tz: "Europe/Oslo", view: [[65, 14], 5], live: false,
-    attribution: '<a href="https://trafikkdata.atlas.vegvesen.no/">Statens vegvesen</a>, NLOD',
-    intro: "Statens vegvesen's motor vehicle and bicycle counters across Norway",
+    attribution: '<a href="https://trafikkdata.atlas.vegvesen.no/">Statens vegvesen</a>, NLOD; municipalities via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "Statens vegvesen's motor vehicle and bicycle counters across Norway, and the cycle and pedestrian counters of Oslo, Bergen, Trondheim, Bærum and other municipalities",
   },
   eng: {
     name: "England", adjective: "UK", tz: "Europe/London", view: [[52.9, -1.6], 6], live: false, monthly: true,
     attribution: '<a href="https://webtris.nationalhighways.co.uk/">National Highways WebTRIS</a>, <a href="https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/">OGL v3.0</a>',
     intro: "National Highways' traffic counters on England's motorways and major A-roads. These are published a month at a time, so the newest data is weeks or months old",
   },
+  ch: {
+    name: "Switzerland", adjective: "Swiss", tz: "Europe/Zurich", view: [[47.45, 8.1], 9], live: false,
+    attribution: '<a href="https://data.stadt-zuerich.ch/">Stadt Zürich</a>, CC0; <a href="https://data.bs.ch/">Kanton Basel-Stadt</a>, CC BY 4.0; Köniz and Kriens via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the car, bicycle and pedestrian counters of the cities of Zürich and Basel, and the cycle counters of Köniz and Kriens. There is no national coverage yet: the federal roads office publishes no hourly counts as open data",
+  },
+  // Countries with only the cycle and pedestrian counters of Eco-Counter's public pages
+  // (scripts/ingest-eco.mjs), each opening on where they are.
+  fr: {
+    name: "France", adjective: "French", tz: "Europe/Paris", view: [[45.8, 4.0], 6], live: false,
+    attribution: 'Métropole de Lyon, Hauts-de-Seine, Var and Annecy via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle and pedestrian counters of Grand Lyon, the Hauts-de-Seine, the Var and Annecy, from their public Eco-Counter pages. Paris's own counters are not included",
+  },
+  es: {
+    name: "Spain", adjective: "Spanish", tz: "Europe/Madrid", view: [[40.4, 0.8], 7], live: false,
+    attribution: 'Àrea Metropolitana de Barcelona, Sant Cugat and Benidorm via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle counters of the Barcelona metropolitan area, Sant Cugat and Benidorm, from their public Eco-Counter pages",
+  },
+  be: {
+    name: "Belgium", adjective: "Belgian", tz: "Europe/Brussels", view: [[50.85, 4.4], 8], live: false,
+    attribution: 'Fietsflow, Kortrijk and Liège via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle and pedestrian counters of Flanders (Fietsflow), Kortrijk and Liège, from their public Eco-Counter pages",
+  },
+  pl: {
+    name: "Poland", adjective: "Polish", tz: "Europe/Warsaw", view: [[51.3, 19.5], 6], live: false,
+    attribution: 'Poznań, Małopolska, Świętokrzyskie and Olsztyn via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle counters of Poznań, Olsztyn and the Małopolska and Świętokrzyskie regions, from their public Eco-Counter pages",
+  },
+  ee: {
+    name: "Estonia", adjective: "Estonian", tz: "Europe/Tallinn", view: [[58.8, 25.2], 7], live: false,
+    attribution: 'Tallinn, Tartu and Pärnu via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle and pedestrian counters of Tallinn, Tartu and Pärnu, from their public Eco-Counter pages",
+  },
+  se: {
+    name: "Sweden", adjective: "Swedish", tz: "Europe/Stockholm", view: [[58.2, 15.0], 6], live: false,
+    attribution: 'Mölndal, Nacka, Västerås, Örebro, Skövde, Karlskrona and other municipalities via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle and pedestrian counters of Mölndal, Nacka, Västerås, Örebro, Skövde, Karlskrona and other municipalities, from their public Eco-Counter pages",
+  },
+  it: {
+    name: "Italy", adjective: "Italian", tz: "Europe/Rome", view: [[45.4, 9.8], 6], live: false,
+    attribution: 'Torino, Bologna, Milano, Cuneo, Riccione and South Tyrol via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle and pedestrian counters of Turin, Bologna and its metropolitan area, Milan, Cuneo, Riccione and South Tyrol's cycle paths, from their public Eco-Counter pages",
+  },
+  pt: {
+    name: "Portugal", adjective: "Portuguese", tz: "Europe/Lisbon", view: [[39.3, -8.3], 6], live: false,
+    attribution: 'Maia and Vilamoura via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle and pedestrian counters of Maia and Vilamoura, from their public Eco-Counter pages",
+  },
+  ie: {
+    name: "Ireland", adjective: "Irish", tz: "Europe/Dublin", view: [[53.33, -6.3], 10], live: false,
+    attribution: 'National Transport Authority via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the National Transport Authority's cycle and pedestrian counters in Dublin, from its public Eco-Counter page",
+  },
+  hu: {
+    name: "Hungary", adjective: "Hungarian", tz: "Europe/Budapest", view: [[47.2, 19.0], 7], live: false,
+    attribution: 'Kerékpárforgalom and Budapest via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle counters on Hungary's cycle routes and in Budapest, from their public Eco-Counter pages",
+  },
 };
 const COUNTRY_ID = (() => {
   const c = new URLSearchParams(location.search).get("country");
   if (c in COUNTRIES) return c;
   // a station link without the parameter
-  return location.hash.startsWith("#nor-") ? "no" : location.hash.startsWith("#eng-") ? "eng" : "fi";
+  const h = location.hash;
+  return h.startsWith("#nor-") ? "no" : h.startsWith("#eng-") ? "eng" : h.startsWith("#zh-") || h.startsWith("#bs-") ? "ch" : "fi";
 })();
 const COUNTRY = COUNTRIES[COUNTRY_ID];
 {
@@ -504,15 +563,22 @@ const ECO_PAGE = "https://data.eco-counter.com/ParcPublic/?id=";
 const NOR_PAGE = "https://trafikkdata.atlas.vegvesen.no/";
 // National Highways' WebTRIS, linked from the English counters.
 const ENG_PAGE = "https://webtris.nationalhighways.co.uk/";
+// The open data portals of the City of Zürich and Basel-Stadt, linked from their counters.
+const ZH_CARS = "https://data.stadt-zuerich.ch/dataset/sid_dav_verkehrszaehlung_miv_od2031";
+const ZH_ECO = "https://data.stadt-zuerich.ch/dataset/ted_taz_verkehrszaehlungen_werte_fussgaenger_velo";
+const BS_PAGE = "https://data.bs.ch/explore/dataset/";
 // Counters outside Digitraffic, by station kind (also the bucket folder of their files), with the
-// country they are shown in. Eco-Counter and Norwegian stations name their own municipality; the
+// country they are shown in. Eco-Counter's pages span countries ("countries"), with a station list
+// per country ("list"). Eco-Counter and Norwegian stations name their own municipality; the
 // English ones have none.
 const CITIES = {
   hel: { country: "fi", name: "Helsinki", count: "City of Helsinki counters" },
   oulu: { country: "fi", name: "Oulu", count: "Oulu counters" },
-  eco: { country: "fi", name: null, count: "Eco-Counter counters" },
+  eco: { country: "fi", countries: ["fi", "no", "ch", "fr", "es", "be", "pl", "ee", "se", "it", "pt", "ie", "hu"], list: (c) => `stations-${c}.json`, name: null, count: "Eco-Counter counters" },
   nor: { country: "no", name: null, count: "Statens vegvesen counters" },
   eng: { country: "eng", name: null, count: "National Highways counters" },
+  zh: { country: "ch", name: "Zürich", count: "Zürich counters" },
+  bs: { country: "ch", name: "Basel", count: "Basel counters" },
 };
 // What a station counts. Digitraffic's LAM stations count motor vehicles.
 const MODES = {
@@ -624,10 +690,10 @@ const CITY_STALE_DAYS = 7;
 
 async function loadCityStations(kind) {
   try {
-    const res = await fetch(`${DATA}/${kind}/stations.json`);
+    const res = await fetch(`${DATA}/${kind}/${CITIES[kind].list?.(COUNTRY_ID) ?? "stations.json"}`);
     if (!res.ok) return [];
     // English stations that never had a complete day are listed without "last", so they aren't fetched again.
-    return (await res.json()).filter((s) => s.last).map((s) => ({
+    return (await res.json()).filter((s) => s.last && (s.country ?? CITIES[kind].country) === COUNTRY_ID).map((s) => ({
       kind,
       key: `${kind}-${s.id}`,
       id: s.id,
@@ -692,7 +758,7 @@ async function loadLam() {
 
 async function loadStations() {
   try {
-    const kinds = Object.keys(CITIES).filter((k) => CITIES[k].country === COUNTRY_ID);
+    const kinds = Object.keys(CITIES).filter((k) => (CITIES[k].countries ?? [CITIES[k].country]).includes(COUNTRY_ID));
     const [lam, cityLists] = await Promise.all([loadLam(), Promise.all(kinds.map(loadCityStations)), loadMeta()]);
     const cities = cityLists.flat();
     if (COUNTRY.monthly && cities.length) END = fromKey(cities.reduce((a, s) => (s.last > a ? s.last : a), ""));
@@ -1144,9 +1210,9 @@ const cache = new Map();
 
 // Link to the original CSV for the selected window: Digitraffic's report, or the hourly (daily for
 // long windows, which would pass the API's page limit) sums from the City of Helsinki's API. Oulu's API
-// has no CSV, nor do Eco-Counter's pages.
+// has no CSV, nor do Eco-Counter's pages; the other sources are linked from the source line.
 function historyUrl(st) {
-  if (st.kind === "oulu" || st.kind === "eco" || st.kind === "nor" || st.kind === "eng") return null;
+  if (st.kind !== "lam" && st.kind !== "hel") return null;
   if (st.kind === "hel") {
     const p = new URLSearchParams({
       counter: String(st.id),
@@ -1253,9 +1319,11 @@ function headHtml(st) {
     ? `Station ${st.tms}${st.inactive ? " · temporarily removed" : ""}`
     : { hel: `City of Helsinki ${MODES[st.mode].noun} · ${escapeHtml(st.source)}`,
         oulu: `${escapeHtml(st.source)} ${MODES[st.mode].noun}`,
-        eco: `${escapeHtml(st.city)} ${MODES[st.mode].noun} · Eco-Counter`,
+        eco: `${escapeHtml(st.city ?? COUNTRY.name)} ${MODES[st.mode].noun} · Eco-Counter`,
         nor: `${escapeHtml(st.source)} ${MODES[st.mode].noun} · ${[st.road, st.city].filter(Boolean).map(escapeHtml).join(", ")}`,
-        eng: `${escapeHtml(st.source)} ${MODES[st.mode].noun} · ${escapeHtml(st.road)}${st.oneWay ? ` · ${escapeHtml(st.oneWay.toLowerCase())} only` : ""}` }[st.kind] +
+        eng: `${escapeHtml(st.source)} ${MODES[st.mode].noun} · ${escapeHtml(st.road)}${st.oneWay ? ` · ${escapeHtml(st.oneWay.toLowerCase())} only` : ""}`,
+        zh: `City of Zürich ${MODES[st.mode].noun} · ${escapeHtml(st.source)}`,
+        bs: `Basel-Stadt ${MODES[st.mode].noun} · ${escapeHtml(st.source)}` }[st.kind] +
       (st.inactive ? ` · no data since ${fmtDate(fromKey(st.last))}` : "");
   return `
     <h2>${escapeHtml(displayName(st))}</h2>
@@ -1405,10 +1473,14 @@ function renderDetail(st, report, dirNames) {
       ${{
         hel: `Source: City of Helsinki, <a href="${HEL_API}/">LIDO-TIKU API</a> (${escapeHtml(st.source)}), CC BY 4.0. Hourly sums, uncorrected; days cut short by an outage are left out.`,
         oulu: `Source: ${escapeHtml(st.source)} Eco-Counter via <a href="${OULU_API}">Oulunliikenne's GraphQL API</a>, CC BY 4.0. Hourly sums, uncorrected; days with missing hours are left out.`,
-        eco: `Source: the city's <a href="${ECO_PAGE}${st.org}">public Eco-Counter page</a>. Hourly sums of all channels, uncorrected; days with missing hours or no counts at all are left out.`,
+        eco: `Source: ${st.city ? `${escapeHtml(st.city)}'s` : "the"} <a href="${ECO_PAGE}${st.org}">public Eco-Counter page</a>. Hourly sums of all channels, uncorrected; days with missing hours or no counts at all are left out.`,
         lam: `Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes).`,
         nor: `Source: <a href="${NOR_PAGE}">Statens vegvesen traffic data</a> (point ${escapeHtml(st.id)}), NLOD. Hourly volumes; days with a missing or partly covered hour are left out.`,
         eng: `Source: <a href="${ENG_PAGE}">National Highways WebTRIS</a> (site ${(st.sites ?? [st.id]).map(escapeHtml).join(" and ")}), OGL v3.0. 15-minute counts summed to hours; days with a missing interval${st.dirs ? " on either carriageway" : ""} are left out.`,
+        zh: st.mode === "car"
+          ? `Source: City of Zürich, <a href="${ZH_CARS}">hourly car counts</a> (site ${escapeHtml(st.id)}), CC0. Days with an hour missing in either direction are left out; a few hours are imputed by the city.`
+          : `Source: City of Zürich, <a href="${ZH_ECO}">automatic cycle and pedestrian counts</a> (site ${escapeHtml(String(st.id).replace(/-.*/, ""))}), CC0. 15-minute counts summed to hours, uncorrected; days with a missing interval are left out.`,
+        bs: `Source: Basel-Stadt Amt für Mobilität, <a href="${BS_PAGE}${st.mode === "car" ? "100006" : "100013"}/">${st.mode === "car" ? "car" : "cycle and pedestrian"} counts</a> (site ${escapeHtml(String(st.id).replace(/-.*/, ""))}), CC BY 4.0. Hourly sums of all lanes; days with a missing hour on a lane are left out.`,
       }[st.kind]} ${COUNTRY.monthly ? "Published a month at a time" : `Updated daily${updated ? `, last on ${fmtDate(updated)}` : ""}`}.
       ${historyUrl(st) ? `<a href="${historyUrl(st)}">Download CSV</a>` : ""}
     </div>`;
