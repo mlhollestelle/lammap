@@ -17,7 +17,7 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { addDays, countBy, dateWindow, fetchJson, iso, key, merge, onePerPlace, parseArgs, readJson, throttle } from "./lib.mjs";
+import { addDays, countBy, dateWindow, fetchJson, iso, key, localHourCounts, merge, onePerPlace, parseArgs, readJson, throttle } from "./lib.mjs";
 
 const API = "https://www.eco-visio.net/api/aladdin/1.0.0/pbl/publicwebpageplus";
 const HEL_API = "https://lidotiku.api.hel.fi/api";
@@ -64,7 +64,10 @@ const DAYS = Number(args.days ?? 7);
 const KEEP = Number(args.keep ?? 366);
 const OUT = args.out ?? "data";
 
-// Finnish local days; the pages report local days and hours.
+// Countries the map shows, with their time zone; the pages report the organisation's local days and hours.
+const TIME_ZONES = { fi: "Europe/Helsinki", ch: "Europe/Zurich" };
+// The window in Finnish days. Elsewhere yesterday is the same day by the time the workflow runs, and
+// the local days are kept as the page reports them.
 const { END, START, OLDEST_KEPT } = dateWindow("Europe/Helsinki", DAYS, KEEP);
 function dmy(date) { const [y, m, d] = iso(date).split("-"); return `${d}/${m}/${y}`; }
 
@@ -90,7 +93,7 @@ async function listCounters() {
       for (const [pratique, mode] of Object.entries(MODES)) {
         const flows = (s.pratique ?? []).filter((p) => String(p.pratique) === pratique).map((p) => p.id);
         if (!flows.length) continue;
-        out.push({ id: `${s.idPdc}-${mode}`, site: s.idPdc, name: s.nom.trim(), city, org: org.id, mode, lat: s.lat, lon: s.lon, flows });
+        out.push({ id: `${s.idPdc}-${mode}`, site: s.idPdc, name: s.nom.trim(), city, country: org.country ?? "fi", org: org.id, mode, lat: s.lat, lon: s.lon, flows });
       }
     }
   }
@@ -112,7 +115,9 @@ async function fetchHours(c) {
 }
 
 // ---------- parse ----------
-function toDays(rows) {
+// Local hours as the page reports them: one row per hour, without the hour the clocks skip in spring
+// and usually with the repeated hour twice in autumn, which are summed.
+function toDays(rows, timeZone) {
   const byDay = new Map();
   for (const [date, count] of rows) {
     const [m, d, y] = date.split("/");
@@ -122,11 +127,12 @@ function toDays(rows) {
   }
   const all = new Map();
   for (const [k, counts] of byDay) {
-    let hours;
-    if (counts.length === 24) hours = counts;
-    else if (counts.length === 23) hours = [...counts.slice(0, 3), 0, ...counts.slice(3)]; // 03:00 skipped
-    else if (counts.length === 25) hours = [...counts.slice(0, 3), counts[3] + counts[4], ...counts.slice(5)];
-    else continue; // a day cut short
+    // 24 rows are the day's hours, also on the autumn DST day, where the pages now and then merge the
+    // repeated hour themselves; otherwise the rows have to match the day's local hours.
+    const expected = counts.length === 24 ? Array(24).fill(1) : localHourCounts(timeZone, k);
+    if (counts.length !== expected.reduce((a, b) => a + b, 0)) continue; // a day cut short
+    let i = 0;
+    const hours = expected.map((n) => { let v = 0; for (let j = 0; j < n; j++) v += counts[i++]; return v; });
     const total = hours.reduce((a, b) => a + b, 0);
     // The pages report outages as zeros, so a whole day of zeros is left out.
     if (!total || k < key(START) || k > key(END)) continue;
@@ -154,11 +160,11 @@ async function main() {
     try {
       const file = path.join(dir, `${c.id}.json`);
       const stored = (await readJson(file)) ?? {};
-      const data = { id: c.id, all: merge(stored.all, toDays(await fetchHours(c)), OLDEST_KEPT) };
+      const data = { id: c.id, all: merge(stored.all, toDays(await fetchHours(c), TIME_ZONES[c.country]), OLDEST_KEPT) };
       const dayKeys = Object.keys(data.all);
       if (dayKeys.length < MIN_DAYS) continue;
       await writeFile(file, JSON.stringify(data));
-      list.push({ id: c.id, name: c.name, city: c.city, org: c.org, mode: c.mode, lat: c.lat, lon: c.lon, dirs: null, last: dayKeys.at(-1), days: dayKeys.length });
+      list.push({ id: c.id, name: c.name, city: c.city, country: c.country, org: c.org, mode: c.mode, lat: c.lat, lon: c.lon, dirs: null, last: dayKeys.at(-1), days: dayKeys.length });
     } catch (e) {
       failed.push(c.id);
       console.error(`Counter ${c.id} ${c.name}: ${e.message}`);

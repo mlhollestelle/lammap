@@ -516,12 +516,13 @@ const ZH_CARS = "https://data.stadt-zuerich.ch/dataset/sid_dav_verkehrszaehlung_
 const ZH_ECO = "https://data.stadt-zuerich.ch/dataset/ted_taz_verkehrszaehlungen_werte_fussgaenger_velo";
 const BS_PAGE = "https://data.bs.ch/explore/dataset/";
 // Counters outside Digitraffic, by station kind (also the bucket folder of their files), with the
-// country they are shown in. Eco-Counter and Norwegian stations name their own municipality; the
+// country they are shown in. Eco-Counter's pages span countries ("countries"), and each of their
+// stations names its own (Finland when it doesn't). Eco-Counter and Norwegian stations name their own municipality; the
 // English ones have none.
 const CITIES = {
   hel: { country: "fi", name: "Helsinki", count: "City of Helsinki counters" },
   oulu: { country: "fi", name: "Oulu", count: "Oulu counters" },
-  eco: { country: "fi", name: null, count: "Eco-Counter counters" },
+  eco: { country: "fi", countries: ["fi", "ch"], name: null, count: "Eco-Counter counters" },
   nor: { country: "no", name: null, count: "Statens vegvesen counters" },
   eng: { country: "eng", name: null, count: "National Highways counters" },
   zh: { country: "ch", name: "Zürich", count: "Zürich counters" },
@@ -640,7 +641,7 @@ async function loadCityStations(kind) {
     const res = await fetch(`${DATA}/${kind}/stations.json`);
     if (!res.ok) return [];
     // English stations that never had a complete day are listed without "last", so they aren't fetched again.
-    return (await res.json()).filter((s) => s.last).map((s) => ({
+    return (await res.json()).filter((s) => s.last && (s.country ?? CITIES[kind].country) === COUNTRY_ID).map((s) => ({
       kind,
       key: `${kind}-${s.id}`,
       id: s.id,
@@ -705,7 +706,7 @@ async function loadLam() {
 
 async function loadStations() {
   try {
-    const kinds = Object.keys(CITIES).filter((k) => CITIES[k].country === COUNTRY_ID);
+    const kinds = Object.keys(CITIES).filter((k) => (CITIES[k].countries ?? [CITIES[k].country]).includes(COUNTRY_ID));
     const [lam, cityLists] = await Promise.all([loadLam(), Promise.all(kinds.map(loadCityStations)), loadMeta()]);
     const cities = cityLists.flat();
     if (COUNTRY.monthly && cities.length) END = fromKey(cities.reduce((a, s) => (s.last > a ? s.last : a), ""));
