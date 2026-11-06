@@ -490,6 +490,31 @@ const COUNTRIES = {
     attribution: 'Tallinn, Tartu and Pärnu via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
     intro: "the cycle and pedestrian counters of Tallinn, Tartu and Pärnu, from their public Eco-Counter pages",
   },
+  se: {
+    name: "Sweden", adjective: "Swedish", tz: "Europe/Stockholm", view: [[58.2, 15.0], 6], live: false,
+    attribution: 'Mölndal, Nacka, Västerås, Örebro, Skövde, Karlskrona and other municipalities via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle and pedestrian counters of Mölndal, Nacka, Västerås, Örebro, Skövde, Karlskrona and other municipalities, from their public Eco-Counter pages",
+  },
+  it: {
+    name: "Italy", adjective: "Italian", tz: "Europe/Rome", view: [[45.4, 9.8], 6], live: false,
+    attribution: 'Torino, Bologna, Milano, Cuneo, Riccione and South Tyrol via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle and pedestrian counters of Turin, Bologna and its metropolitan area, Milan, Cuneo, Riccione and South Tyrol's cycle paths, from their public Eco-Counter pages",
+  },
+  pt: {
+    name: "Portugal", adjective: "Portuguese", tz: "Europe/Lisbon", view: [[39.3, -8.3], 6], live: false,
+    attribution: 'Maia and Vilamoura via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle and pedestrian counters of Maia and Vilamoura, from their public Eco-Counter pages",
+  },
+  ie: {
+    name: "Ireland", adjective: "Irish", tz: "Europe/Dublin", view: [[53.33, -6.3], 10], live: false,
+    attribution: 'National Transport Authority via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the National Transport Authority's cycle and pedestrian counters in Dublin, from its public Eco-Counter page",
+  },
+  hu: {
+    name: "Hungary", adjective: "Hungarian", tz: "Europe/Budapest", view: [[47.2, 19.0], 7], live: false,
+    attribution: 'Kerékpárforgalom and Budapest via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the cycle counters on Hungary's cycle routes and in Budapest, from their public Eco-Counter pages",
+  },
 };
 const COUNTRY_ID = (() => {
   const c = new URLSearchParams(location.search).get("country");
@@ -549,7 +574,7 @@ const BS_PAGE = "https://data.bs.ch/explore/dataset/";
 const CITIES = {
   hel: { country: "fi", name: "Helsinki", count: "City of Helsinki counters" },
   oulu: { country: "fi", name: "Oulu", count: "Oulu counters" },
-  eco: { country: "fi", countries: ["fi", "no", "ch", "fr", "es", "be", "pl", "ee"], list: (c) => `stations-${c}.json`, name: null, count: "Eco-Counter counters" },
+  eco: { country: "fi", countries: ["fi", "no", "ch", "fr", "es", "be", "pl", "ee", "se", "it", "pt", "ie", "hu"], list: (c) => `stations-${c}.json`, name: null, count: "Eco-Counter counters" },
   nor: { country: "no", name: null, count: "Statens vegvesen counters" },
   eng: { country: "eng", name: null, count: "National Highways counters" },
   zh: { country: "ch", name: "Zürich", count: "Zürich counters" },
@@ -1294,7 +1319,7 @@ function headHtml(st) {
     ? `Station ${st.tms}${st.inactive ? " · temporarily removed" : ""}`
     : { hel: `City of Helsinki ${MODES[st.mode].noun} · ${escapeHtml(st.source)}`,
         oulu: `${escapeHtml(st.source)} ${MODES[st.mode].noun}`,
-        eco: `${escapeHtml(st.city)} ${MODES[st.mode].noun} · Eco-Counter`,
+        eco: `${escapeHtml(st.city ?? COUNTRY.name)} ${MODES[st.mode].noun} · Eco-Counter`,
         nor: `${escapeHtml(st.source)} ${MODES[st.mode].noun} · ${[st.road, st.city].filter(Boolean).map(escapeHtml).join(", ")}`,
         eng: `${escapeHtml(st.source)} ${MODES[st.mode].noun} · ${escapeHtml(st.road)}${st.oneWay ? ` · ${escapeHtml(st.oneWay.toLowerCase())} only` : ""}`,
         zh: `City of Zürich ${MODES[st.mode].noun} · ${escapeHtml(st.source)}`,
@@ -1448,7 +1473,7 @@ function renderDetail(st, report, dirNames) {
       ${{
         hel: `Source: City of Helsinki, <a href="${HEL_API}/">LIDO-TIKU API</a> (${escapeHtml(st.source)}), CC BY 4.0. Hourly sums, uncorrected; days cut short by an outage are left out.`,
         oulu: `Source: ${escapeHtml(st.source)} Eco-Counter via <a href="${OULU_API}">Oulunliikenne's GraphQL API</a>, CC BY 4.0. Hourly sums, uncorrected; days with missing hours are left out.`,
-        eco: `Source: ${escapeHtml(st.city)}'s <a href="${ECO_PAGE}${st.org}">public Eco-Counter page</a>. Hourly sums of all channels, uncorrected; days with missing hours or no counts at all are left out.`,
+        eco: `Source: ${st.city ? `${escapeHtml(st.city)}'s` : "the"} <a href="${ECO_PAGE}${st.org}">public Eco-Counter page</a>. Hourly sums of all channels, uncorrected; days with missing hours or no counts at all are left out.`,
         lam: `Source: Digitraffic LAM “liikennemäärä” hourly report (checked/corrected volumes).`,
         nor: `Source: <a href="${NOR_PAGE}">Statens vegvesen traffic data</a> (point ${escapeHtml(st.id)}), NLOD. Hourly volumes; days with a missing or partly covered hour are left out.`,
         eng: `Source: <a href="${ENG_PAGE}">National Highways WebTRIS</a> (site ${(st.sites ?? [st.id]).map(escapeHtml).join(" and ")}), OGL v3.0. 15-minute counts summed to hours; days with a missing interval${st.dirs ? " on either carriageway" : ""} are left out.`,

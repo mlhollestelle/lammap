@@ -1,6 +1,6 @@
 // Fetches the cycle and pedestrian counters that cities and regions publish on Eco-Counter's public
 // web pages (Eco-Visio's "publicwebpageplus" API, which the pages themselves use; not documented by
-// Eco-Counter), in Finland, Norway, Switzerland, France, Spain, Belgium, Poland and Estonia. Hourly
+// Eco-Counter), in Finland, Norway, Switzerland and twelve other European countries. Hourly
 // sums are merged into one JSON file per counter in the same format as scripts/ingest.mjs, plus a
 // station list per country. Run by .github/workflows/ingest.yml, which syncs the output directory with
 // the R2 bucket.
@@ -92,6 +92,35 @@ const ORGS = [
   { id: 5327, city: "Tallinn", country: "ee" },
   { id: 5736, city: "Tartu", country: "ee" },
   { id: 6280, city: "Pärnu", country: "ee" },
+  // Sweden; Tyresö slott (5219) counts visitors to a castle park.
+  { id: 186, city: "Mölndal", country: "se" },
+  { id: 3953, city: "Nacka", country: "se" },
+  { id: 3972, city: "Karlskoga", country: "se" },
+  { id: 4615, city: "Västerås", country: "se" },
+  { id: 5582, city: "Upplands-Bro", country: "se" },
+  { id: 5587, city: "Skövde", country: "se" },
+  { id: 5636, city: "Karlskrona", country: "se" },
+  { id: 5797, city: "Örebro", country: "se" },
+  { id: 6228, city: "Kungälv", country: "se" },
+  // Italy; left out are Parco Nord Milano (5594), a park, and Friuli Venezia Giulia (7157), whose
+  // counters all stopped. ReVAL's counters are in Cuneo.
+  { id: 6771, city: "Torino", country: "it" },
+  { id: 6082, city: "Bologna", country: "it" },
+  { id: 8887, city: "Bologna metropolitan area", country: "it" },
+  { id: 3738, city: "Milano", country: "it" },
+  { id: 824, city: "Cuneo", country: "it" },
+  { id: 7613, city: "Riccione", country: "it" },
+  { id: 6709, city: "Eisacktal", country: "it" },
+  { id: 6716, city: "Burggrafenamt", country: "it" },
+  { id: 6717, city: "Salten-Schlern", country: "it" },
+  // Portugal
+  { id: 6167, city: "Maia", country: "pt" },
+  { id: 5716, city: "Vilamoura", country: "pt" },
+  // Ireland: the National Transport Authority's counters in Dublin.
+  { id: 5089, city: "Dublin", country: "ie" },
+  // Hungary: Budapest, and the counters on cycle routes across the country (the town is in the name).
+  { id: 809, city: "Budapest", country: "hu" },
+  { id: 8076, city: null, country: "hu" },
 ];
 const SITE_CITY = {
   // Espoo
@@ -129,7 +158,8 @@ const PARALLEL = 3;
 // Countries the map shows, with their time zone; the pages report the organisation's local days and hours.
 const TIME_ZONES = {
   fi: "Europe/Helsinki", no: "Europe/Oslo", ch: "Europe/Zurich", fr: "Europe/Paris", es: "Europe/Madrid",
-  be: "Europe/Brussels", pl: "Europe/Warsaw", ee: "Europe/Tallinn",
+  be: "Europe/Brussels", pl: "Europe/Warsaw", ee: "Europe/Tallinn", se: "Europe/Stockholm", it: "Europe/Rome",
+  pt: "Europe/Lisbon", ie: "Europe/Dublin", hu: "Europe/Budapest",
 };
 const NOR_API = "https://trafikkdata-api.atlas.vegvesen.no/";
 // The window in Finnish days. Elsewhere yesterday is the same day by the time the workflow runs, and

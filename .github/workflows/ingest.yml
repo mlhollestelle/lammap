@@ -20,8 +20,8 @@ on:
         description: Minutes the Norwegian counters may take (a full year needs about 6 hours over several runs)
         default: "60"
       eco_minutes:
-        description: Minutes the Eco-Counter counters may take (a full year takes about 35 minutes)
-        default: "45"
+        description: Minutes the Eco-Counter counters may take (a full year takes about 45 minutes)
+        default: "50"
       eng_minutes:
         description: Minutes the English counters may take (a new month takes about 25 minutes, a full year about 5 hours over several runs)
         default: "60"
@@ -52,7 +52,7 @@ jobs:
       FD_DAYS: ${{ inputs.fd_days || '7' }}
       NOR_MINUTES: ${{ inputs.nor_minutes || '60' }}
       ENG_MINUTES: ${{ inputs.eng_minutes || '60' }}
-      ECO_MINUTES: ${{ inputs.eco_minutes || '45' }}
+      ECO_MINUTES: ${{ inputs.eco_minutes || '50' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -89,7 +89,7 @@ jobs:
 
       # Cycle and pedestrian counters on Eco-Counter's public pages: Espoo, Vantaa, Lahti, Joensuu and
       # others in Finland, Oslo, Bergen, Trondheim and others in Norway, Köniz and Kriens in Switzerland,
-      # and the countries that only have these (France, Spain, Belgium, Poland, Estonia). Stops after
+      # and the ten countries that only have these (France, Spain, Sweden, Italy and others). Stops after
       # ECO_MINUTES; a backfill continues where it stopped when run again with skip_existing.
       - name: Fetch Eco-Counter counters
         if: ${{ !cancelled() }}
