@@ -83,7 +83,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: node scripts/ingest-oulu.mjs --days "$DAYS"
 
-      # Cycle and pedestrian counters on Eco-Counter's public pages: Espoo, Vantaa, Lahti, Joensuu and others.
+      # Cycle and pedestrian counters on Eco-Counter's public pages: Espoo, Vantaa, Lahti, Joensuu and
+      # others in Finland, Oslo, Bergen, Trondheim and others in Norway, Köniz and Kriens in Switzerland.
       - name: Fetch Eco-Counter counters
         if: ${{ !cancelled() }}
         run: node scripts/ingest-eco.mjs --days "$DAYS"

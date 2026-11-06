@@ -450,8 +450,8 @@ const COUNTRIES = {
   },
   no: {
     name: "Norway", adjective: "Norwegian", tz: "Europe/Oslo", view: [[65, 14], 5], live: false,
-    attribution: '<a href="https://trafikkdata.atlas.vegvesen.no/">Statens vegvesen</a>, NLOD',
-    intro: "Statens vegvesen's motor vehicle and bicycle counters across Norway",
+    attribution: '<a href="https://trafikkdata.atlas.vegvesen.no/">Statens vegvesen</a>, NLOD; municipalities via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "Statens vegvesen's motor vehicle and bicycle counters across Norway, and the cycle and pedestrian counters of Oslo, Bergen, Trondheim, Bærum and other municipalities",
   },
   eng: {
     name: "England", adjective: "UK", tz: "Europe/London", view: [[52.9, -1.6], 6], live: false, monthly: true,
@@ -460,8 +460,8 @@ const COUNTRIES = {
   },
   ch: {
     name: "Switzerland", adjective: "Swiss", tz: "Europe/Zurich", view: [[47.45, 8.1], 9], live: false,
-    attribution: '<a href="https://data.stadt-zuerich.ch/">Stadt Zürich</a>, CC0; <a href="https://data.bs.ch/">Kanton Basel-Stadt</a>, CC BY 4.0',
-    intro: "the car, bicycle and pedestrian counters of the cities of Zürich and Basel. There is no national coverage yet: the federal roads office publishes no hourly counts as open data",
+    attribution: '<a href="https://data.stadt-zuerich.ch/">Stadt Zürich</a>, CC0; <a href="https://data.bs.ch/">Kanton Basel-Stadt</a>, CC BY 4.0; Köniz and Kriens via <a href="https://www.eco-counter.com/">Eco-Counter</a>',
+    intro: "the car, bicycle and pedestrian counters of the cities of Zürich and Basel, and the cycle counters of Köniz and Kriens. There is no national coverage yet: the federal roads office publishes no hourly counts as open data",
   },
 };
 const COUNTRY_ID = (() => {
@@ -522,7 +522,7 @@ const BS_PAGE = "https://data.bs.ch/explore/dataset/";
 const CITIES = {
   hel: { country: "fi", name: "Helsinki", count: "City of Helsinki counters" },
   oulu: { country: "fi", name: "Oulu", count: "Oulu counters" },
-  eco: { country: "fi", countries: ["fi", "ch"], name: null, count: "Eco-Counter counters" },
+  eco: { country: "fi", countries: ["fi", "no", "ch"], name: null, count: "Eco-Counter counters" },
   nor: { country: "no", name: null, count: "Statens vegvesen counters" },
   eng: { country: "eng", name: null, count: "National Highways counters" },
   zh: { country: "ch", name: "Zürich", count: "Zürich counters" },

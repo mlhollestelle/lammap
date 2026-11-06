@@ -1,6 +1,6 @@
-// Fetches the cycle and pedestrian counters that Finnish cities publish on Eco-Counter's public web
-// pages (Eco-Visio's "publicwebpageplus" API, which the pages themselves use; not documented by
-// Eco-Counter). Hourly sums are merged into one JSON file per counter in the same format as
+// Fetches the cycle and pedestrian counters that cities in Finland, Norway and Switzerland publish on
+// Eco-Counter's public web pages (Eco-Visio's "publicwebpageplus" API, which the pages themselves use;
+// not documented by Eco-Counter). Hourly sums are merged into one JSON file per counter in the same format as
 // scripts/ingest.mjs, plus a station list. Run by .github/workflows/ingest.yml, which syncs the
 // output directory with the R2 bucket.
 //
@@ -25,9 +25,16 @@ const MIN_GAP_MS = 500;
 const CHUNK_DAYS = 120;
 // Eco-Counter's "pratique": 1 pedestrians, 2 cyclists. Others (cars, scooters, vehicle classes) are left out.
 const MODES = { 1: "pedestrian", 2: "bike" };
-// The public pages of Finnish organisations, with the municipality of their counters. The Helsinki
-// region page covers several cities, so its sites outside Helsinki are listed in SITE_CITY. Tampere's
-// and Turku's counters are not public.
+// The public pages of organisations, with the municipality of their counters and their country (Finland
+// when not given). The Helsinki region page covers several cities, so its sites outside Helsinki are
+// listed in SITE_CITY. Tampere's and Turku's counters are not public, and the City of Helsinki's own
+// page (3886) holds the counters scripts/ingest-hel.mjs already fetches.
+//
+// Norway: the municipal and county pages. Left out are the Oslo "public" page (4054), whose sites are
+// mostly Statens vegvesen's counters, the vegvesen pages themselves (4058, 5674), and the hiking trail,
+// pilgrim route, museum and sports ground pages (4334, 4984, 5039, 5065, 5403). Statens vegvesen's
+// cycle counters are on the map from scripts/ingest-nor.mjs, so municipal cycle counters at the same
+// place are skipped. Public pages were found by trying organisation ids 1 to 12000 (November 2026).
 const ORGS = [
   { id: 5589, city: "Helsinki" }, // "Helsingin seutu"
   { id: 26, city: "Lahti" },
@@ -35,6 +42,25 @@ const ORGS = [
   { id: 5040, city: "Vaasa" },
   { id: 6014, city: "Rovaniemi" },
   { id: 6091, city: "Hämeenlinna" },
+  // Switzerland; Köniz names its devices "K6-VV Schwarzenburgstrasse ...".
+  { id: 3964, city: "Köniz", country: "ch", strip: /^[A-Z]\d+-VV\s+/ },
+  { id: 4951, city: "Kriens", country: "ch" },
+  // Norway
+  { id: 3936, city: "Oslo", country: "no" },
+  { id: 4173, city: "Bergen", country: "no" },
+  { id: 6359, city: "Trondheim", country: "no" },
+  { id: 3751, city: "Tromsø", country: "no" },
+  { id: 4754, city: "Bærum", country: "no" },
+  { id: 7576, city: "Fredrikstad", country: "no" },
+  { id: 3655, city: "Lillehammer", country: "no" },
+  { id: 6286, city: "Stjørdal", country: "no" },
+  { id: 3782, city: "Malvik", country: "no" },
+  { id: 4217, city: "Lier", country: "no" },
+  { id: 5435, city: "Rælingen", country: "no" },
+  { id: 5790, city: "Haugesund", country: "no" },
+  { id: 6777, city: "Ørland", country: "no" },
+  { id: 7542, city: "Austevoll", country: "no" },
+  { id: 4043, city: "Trøndelag", country: "no" }, // the county's counters, in several municipalities
 ];
 const SITE_CITY = {
   // Espoo
@@ -65,7 +91,8 @@ const KEEP = Number(args.keep ?? 366);
 const OUT = args.out ?? "data";
 
 // Countries the map shows, with their time zone; the pages report the organisation's local days and hours.
-const TIME_ZONES = { fi: "Europe/Helsinki", ch: "Europe/Zurich" };
+const TIME_ZONES = { fi: "Europe/Helsinki", ch: "Europe/Zurich", no: "Europe/Oslo" };
+const NOR_API = "https://trafikkdata-api.atlas.vegvesen.no/";
 // The window in Finnish days. Elsewhere yesterday is the same day by the time the workflow runs, and
 // the local days are kept as the page reports them.
 const { END, START, OLDEST_KEPT } = dateWindow("Europe/Helsinki", DAYS, KEEP);
@@ -80,10 +107,23 @@ function metres(a, b) {
   return Math.hypot(dx, dy);
 }
 
+// Statens vegvesen's cycle counters, which the Norwegian map already shows.
+async function norwegianCycleCounters() {
+  const body = await fetchJson(NOR_API, { wait, init: {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "User-Agent": "lammap (github.com/mlhollestelle/lammap)" },
+    body: JSON.stringify({ query: "{ trafficRegistrationPoints { trafficRegistrationType location { coordinates { latLon { lat lon } } } } }" }),
+  } });
+  return body.data.trafficRegistrationPoints
+    .filter((p) => p.trafficRegistrationType === "BICYCLE" && p.location?.coordinates?.latLon)
+    .map((p) => p.location.coordinates.latLon);
+}
+
 // One counter per site and mode, with the flows that count it.
 async function listCounters() {
   const hel = (await getJson(`${HEL_API}/counters/?${new URLSearchParams({ source: "EcoCounter", page_size: "1000" })}`))
     .results.features.map((f) => ({ name: f.properties.name.toLowerCase(), lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0] }));
+  const nor = await norwegianCycleCounters();
   const out = [];
   for (const org of ORGS) {
     for (const s of await getJson(`${API}/${org.id}?withNull=true`)) {
@@ -93,7 +133,9 @@ async function listCounters() {
       for (const [pratique, mode] of Object.entries(MODES)) {
         const flows = (s.pratique ?? []).filter((p) => String(p.pratique) === pratique).map((p) => p.id);
         if (!flows.length) continue;
-        out.push({ id: `${s.idPdc}-${mode}`, site: s.idPdc, name: s.nom.trim(), city, country: org.country ?? "fi", org: org.id, mode, lat: s.lat, lon: s.lon, flows });
+        if (org.country === "no" && mode === "bike" && nor.some((p) => metres(p, s) < SAME_PLACE_M)) continue;
+        const name = s.nom.trim().replace(org.strip ?? /^$/, "");
+        out.push({ id: `${s.idPdc}-${mode}`, site: s.idPdc, name, city, country: org.country ?? "fi", org: org.id, mode, lat: s.lat, lon: s.lon, flows });
       }
     }
   }
