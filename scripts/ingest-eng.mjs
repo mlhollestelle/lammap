@@ -30,6 +30,9 @@ const MIN_GAP_MS = 300;
 // The API refuses more than about 30 sites per request, and pages at most 40,000 rows (15-minute intervals).
 const BATCH_SITES = 30;
 const PAGE = 40000;
+// A year for 30 sites takes the API about 30 seconds per page, at its own time limit, so it often answers
+// HTTP 500; a window is fetched a month at a time instead (about 6 seconds a page).
+const CHUNK_DAYS = 31;
 // Requests at a time: the API answers three about as fast as one.
 const PARALLEL = 3;
 const MAX_FAILED_BATCHES = 3;
@@ -230,15 +233,18 @@ function toMaps(station, acc, start, end) {
   return maps;
 }
 
-// Rows for a batch of stations from start to end, page by page. Returns the hourly sums by site name.
+// Rows for a batch of stations from start to end, a month and a page at a time. Returns the hourly sums by site name.
 async function fetchBatch(batch, start, end) {
   const sites = batch.flatMap((st) => st.sites.map((s) => s.id)).join(",");
   const acc = new Map();
-  for (let page = 1; ; page++) {
-    const body = await get(`${API}/reports/Daily?sites=${sites}&start_date=${ddmmyyyy(start)}&end_date=${ddmmyyyy(end)}&page=${page}&page_size=${PAGE}`);
-    if (!body) break;
-    addRows(acc, body.Rows);
-    if (page * PAGE >= body.Header.row_count) break;
+  for (let from = start; from <= end; from = addDays(from, CHUNK_DAYS)) {
+    const to = [addDays(from, CHUNK_DAYS - 1), end].sort((a, b) => a - b)[0];
+    for (let page = 1; ; page++) {
+      const body = await get(`${API}/reports/Daily?sites=${sites}&start_date=${ddmmyyyy(from)}&end_date=${ddmmyyyy(to)}&page=${page}&page_size=${PAGE}`);
+      if (!body) break;
+      addRows(acc, body.Rows);
+      if (page * PAGE >= body.Header.row_count) break;
+    }
   }
   return acc;
 }
